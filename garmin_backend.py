@@ -16,6 +16,8 @@ Potrebne env varijable (postavi ih u Render dashboardu, NIKAD u git):
                                      (lokalno: ./serviceAccountKey.json,
                                       na Renderu: putanja do "Secret File")
 """
+import base64
+import json
 import os
 import sqlite3
 import time
@@ -23,15 +25,28 @@ from datetime import date, timedelta
 from pathlib import Path
 
 import firebase_admin
-from fastapi import BackgroundTasks, FastAPI, Header, HTTPException
+import webauthn
+from fastapi import BackgroundTasks, FastAPI, Header, HTTPException, Request
 from fastapi.middleware.cors import CORSMiddleware
 from firebase_admin import auth as fb_auth
 from firebase_admin import credentials, firestore
+from webauthn.helpers import (
+    parse_authentication_credential_json,
+    parse_registration_credential_json,
+)
+from webauthn.helpers.structs import (
+    AuthenticatorSelectionCriteria,
+    PublicKeyCredentialDescriptor,
+    ResidentKeyRequirement,
+    UserVerificationRequirement,
+)
 
 from garmin_sync import DB_PATH, init_db, login, sync_activities, sync_day
 
 BASE_DIR = Path(__file__).resolve().parent
 ADMIN_EMAIL = "naddinko@gmail.com"
+WEBAUTHN_RP_ID = os.getenv("WEBAUTHN_RP_ID", "nagyphotos.netlify.app")
+WEBAUTHN_RP_NAME = "Nagy Photos"
 
 FIREBASE_CREDENTIALS_PATH = os.getenv("FIREBASE_CREDENTIALS_PATH", str(BASE_DIR / "serviceAccountKey.json"))
 
@@ -142,3 +157,139 @@ def sync(background_tasks: BackgroundTasks, days: int = 3, since: str | None = N
     background_tasks.add_task(obavi_sync, start, end)
 
     return {"ok": True, "pokrenuto": True, "od": start.isoformat(), "do": end.isoformat()}
+
+
+# ==================== FACE ID (WebAuthn) ====================
+# Prava WebAuthn registracija/prijava - backend čuva javni ključ svakog uređaja i
+# provjerava kriptografski potpis, baš kao svaka ozbiljna "Prijavi se Face ID-om"
+# mogućnost. Nakon uspješne potvrde izdaje se prava Firebase prijava (custom token).
+
+def b64url_decode(s: str) -> bytes:
+    dopuna = "=" * (-len(s) % 4)
+    return base64.urlsafe_b64decode(s + dopuna)
+
+
+def b64url_encode(b: bytes) -> str:
+    return base64.urlsafe_b64encode(b).decode().rstrip("=")
+
+
+def spremi_izazov(challenge: bytes):
+    db_fs.collection("security").document("faceid-izazov").set({
+        "izazov": b64url_encode(challenge),
+        "vrijeme": firestore.SERVER_TIMESTAMP,
+    })
+
+
+def dohvati_izazov() -> bytes:
+    snap = db_fs.collection("security").document("faceid-izazov").get()
+    if not snap.exists:
+        raise HTTPException(status_code=400, detail="Nema aktivnog izazova - pokušaj ponovno.")
+    return b64url_decode(snap.to_dict()["izazov"])
+
+
+def dohvati_credentiale() -> list:
+    snap = db_fs.collection("security").document("webauthn-credentials").get()
+    return (snap.to_dict() or {}).get("credentials", []) if snap.exists else []
+
+
+@app.get("/faceid/register-options")
+def faceid_register_options(authorization: str | None = Header(default=None)):
+    provjeri_admina(authorization)
+    user = fb_auth.get_user_by_email(ADMIN_EMAIL)
+    postojeci = dohvati_credentiale()
+
+    opcije = webauthn.generate_registration_options(
+        rp_id=WEBAUTHN_RP_ID,
+        rp_name=WEBAUTHN_RP_NAME,
+        user_name=ADMIN_EMAIL,
+        user_id=user.uid.encode(),
+        exclude_credentials=[
+            PublicKeyCredentialDescriptor(id=b64url_decode(c["id"])) for c in postojeci
+        ],
+        authenticator_selection=AuthenticatorSelectionCriteria(
+            resident_key=ResidentKeyRequirement.PREFERRED,
+            user_verification=UserVerificationRequirement.REQUIRED,
+        ),
+    )
+    spremi_izazov(opcije.challenge)
+    return json.loads(webauthn.options_to_json(opcije))
+
+
+@app.post("/faceid/register-verify")
+async def faceid_register_verify(request: Request, authorization: str | None = Header(default=None)):
+    provjeri_admina(authorization)
+    tijelo = await request.json()
+    expected_challenge = dohvati_izazov()
+
+    try:
+        credential = parse_registration_credential_json(tijelo["credential"])
+        rezultat = webauthn.verify_registration_response(
+            credential=credential,
+            expected_challenge=expected_challenge,
+            expected_rp_id=WEBAUTHN_RP_ID,
+            expected_origin=DOZVOLJENI_ORIGINI,
+        )
+    except Exception as e:
+        raise HTTPException(status_code=400, detail=f"Registracija nije uspjela: {e}")
+
+    zapis = {
+        "id": b64url_encode(rezultat.credential_id),
+        "javniKljuc": b64url_encode(rezultat.credential_public_key),
+        "brojPotpisa": rezultat.sign_count,
+        "naziv": tijelo.get("naziv") or "Uređaj",
+    }
+    postojeci = dohvati_credentiale()
+    postojeci.append(zapis)
+    db_fs.collection("security").document("webauthn-credentials").set({"credentials": postojeci}, merge=True)
+
+    return {"ok": True}
+
+
+@app.get("/faceid/login-options")
+def faceid_login_options():
+    postojeci = dohvati_credentiale()
+    if not postojeci:
+        raise HTTPException(status_code=404, detail="Face ID nije registriran ni na jednom uređaju.")
+
+    opcije = webauthn.generate_authentication_options(
+        rp_id=WEBAUTHN_RP_ID,
+        allow_credentials=[PublicKeyCredentialDescriptor(id=b64url_decode(c["id"])) for c in postojeci],
+        user_verification=UserVerificationRequirement.REQUIRED,
+    )
+    spremi_izazov(opcije.challenge)
+    return json.loads(webauthn.options_to_json(opcije))
+
+
+@app.post("/faceid/login-verify")
+async def faceid_login_verify(request: Request):
+    tijelo = await request.json()
+    expected_challenge = dohvati_izazov()
+
+    postojeci = dohvati_credentiale()
+    poslani_id = tijelo["credential"]["id"]
+    zapis = next((c for c in postojeci if c["id"] == poslani_id), None)
+    if not zapis:
+        raise HTTPException(status_code=401, detail="Nepoznat Face ID uređaj.")
+
+    try:
+        credential = parse_authentication_credential_json(tijelo["credential"])
+        rezultat = webauthn.verify_authentication_response(
+            credential=credential,
+            expected_challenge=expected_challenge,
+            expected_rp_id=WEBAUTHN_RP_ID,
+            expected_origin=DOZVOLJENI_ORIGINI,
+            credential_public_key=b64url_decode(zapis["javniKljuc"]),
+            credential_current_sign_count=zapis.get("brojPotpisa", 0),
+        )
+    except Exception as e:
+        raise HTTPException(status_code=401, detail=f"Face ID potvrda nije uspjela: {e}")
+
+    azurirani = [
+        {**c, "brojPotpisa": rezultat.new_sign_count} if c["id"] == poslani_id else c
+        for c in postojeci
+    ]
+    db_fs.collection("security").document("webauthn-credentials").set({"credentials": azurirani})
+
+    user = fb_auth.get_user_by_email(ADMIN_EMAIL)
+    token = fb_auth.create_custom_token(user.uid)
+    return {"token": token.decode() if isinstance(token, bytes) else token}
