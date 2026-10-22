@@ -23,7 +23,7 @@ from datetime import date, timedelta
 from pathlib import Path
 
 import firebase_admin
-from fastapi import FastAPI, Header, HTTPException
+from fastapi import BackgroundTasks, FastAPI, Header, HTTPException
 from fastapi.middleware.cors import CORSMiddleware
 from firebase_admin import auth as fb_auth
 from firebase_admin import credentials, firestore
@@ -69,25 +69,59 @@ def provjeri_admina(authorization: str | None):
         raise HTTPException(status_code=403, detail="Nemaš pristup.")
 
 
-def posalji_u_firestore(conn, start: date, end: date):
-    cur = conn.execute(
-        "SELECT * FROM daily WHERE day BETWEEN ? AND ? ORDER BY day",
-        (start.isoformat(), end.isoformat()),
-    )
+def posalji_dan_u_firestore(conn, dan: str):
+    """Pošalje jedan dan iz SQLite u Firestore odmah - tako se napredak sprema
+    postupno, čak i ako dugo povlačenje povijesti negdje usput zapne."""
+    cur = conn.execute("SELECT * FROM daily WHERE day = ?", (dan,))
     cols = [c[0] for c in cur.description]
-    batch = db_fs.batch()
+    row = cur.fetchone()
+    if not row:
+        return False
+    podaci = dict(zip(cols, row))
+    podaci.pop("day")
+    podaci["dan"] = dan
+    podaci["azurirano"] = firestore.SERVER_TIMESTAMP
+    db_fs.collection("zdravlje-dani").document(dan).set(podaci, merge=True)
+    return True
+
+
+def obavi_sync(start: date, end: date):
+    meta_ref = db_fs.collection("zdravlje-meta").document("zadnji-sync")
+    meta_ref.set({
+        "uTijeku": True,
+        "pocetak": firestore.SERVER_TIMESTAMP,
+        "od": start.isoformat(),
+        "do": end.isoformat(),
+    }, merge=True)
+
+    conn = sqlite3.connect(DB_PATH)
+    init_db(conn)
+
+    try:
+        api = login()
+    except Exception as e:
+        conn.close()
+        meta_ref.set({"uTijeku": False, "greska": str(e), "vrijeme": firestore.SERVER_TIMESTAMP}, merge=True)
+        return
+
     broj = 0
-    for row in cur.fetchall():
-        podaci = dict(zip(cols, row))
-        dan = podaci.pop("day")
-        podaci["dan"] = dan
-        podaci["azurirano"] = firestore.SERVER_TIMESTAMP
-        ref = db_fs.collection("zdravlje-dani").document(dan)
-        batch.set(ref, podaci, merge=True)
-        broj += 1
-    if broj:
-        batch.commit()
-    return broj
+    day = start
+    while day <= end:
+        sync_day(api, conn, day)
+        if posalji_dan_u_firestore(conn, day.isoformat()):
+            broj += 1
+        day += timedelta(days=1)
+        time.sleep(1)
+
+    sync_activities(api, conn, start, end)
+    conn.close()
+
+    meta_ref.set({
+        "vrijeme": firestore.SERVER_TIMESTAMP,
+        "dana": broj,
+        "uTijeku": False,
+        "greska": firestore.DELETE_FIELD,
+    }, merge=True)
 
 
 @app.get("/health")
@@ -96,34 +130,15 @@ def health():
 
 
 @app.post("/sync")
-def sync(days: int = 3, authorization: str | None = Header(default=None)):
+def sync(background_tasks: BackgroundTasks, days: int = 3, since: str | None = None,
+          authorization: str | None = Header(default=None)):
     provjeri_admina(authorization)
 
-    conn = sqlite3.connect(DB_PATH)
-    init_db(conn)
-
     end = date.today()
-    start = end - timedelta(days=max(days, 1) - 1)
+    start = date.fromisoformat(since) if since else end - timedelta(days=max(days, 1) - 1)
+    if start > end:
+        raise HTTPException(status_code=400, detail="'since' mora biti prije danas.")
 
-    try:
-        api = login()
-    except Exception as e:
-        conn.close()
-        raise HTTPException(status_code=502, detail=f"Prijava na Garmin nije uspjela: {e}")
+    background_tasks.add_task(obavi_sync, start, end)
 
-    day = start
-    while day <= end:
-        sync_day(api, conn, day)
-        day += timedelta(days=1)
-        time.sleep(1)
-    sync_activities(api, conn, start, end)
-
-    broj = posalji_u_firestore(conn, start, end)
-    conn.close()
-
-    db_fs.collection("zdravlje-meta").document("zadnji-sync").set({
-        "vrijeme": firestore.SERVER_TIMESTAMP,
-        "dana": broj,
-    })
-
-    return {"ok": True, "dana_azurirano": broj}
+    return {"ok": True, "pokrenuto": True, "od": start.isoformat(), "do": end.isoformat()}
