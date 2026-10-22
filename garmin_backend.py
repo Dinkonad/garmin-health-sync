@@ -80,6 +80,7 @@ def posalji_u_firestore(conn, start: date, end: date):
     for row in cur.fetchall():
         podaci = dict(zip(cols, row))
         dan = podaci.pop("day")
+        podaci["dan"] = dan
         podaci["azurirano"] = firestore.SERVER_TIMESTAMP
         ref = db_fs.collection("zdravlje-dani").document(dan)
         batch.set(ref, podaci, merge=True)
