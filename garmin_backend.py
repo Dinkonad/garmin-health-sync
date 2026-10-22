@@ -137,6 +137,8 @@ def obavi_sync(start: date, end: date):
         return
 
     broj = 0
+    broj_aktivnosti = 0
+    pocetak_komada = start
     day = start
     while day <= end:
         sync_day(api, conn, day)
@@ -145,8 +147,16 @@ def obavi_sync(start: date, end: date):
         day += timedelta(days=1)
         time.sleep(1)
 
-    sync_activities(api, conn, start, end)
-    broj_aktivnosti = posalji_aktivnosti_u_firestore(conn, start, end)
+        # aktivnosti se salju u komadima od ~30 dana tijekom sinkronizacije (ne tek
+        # na kraju) - tako da duga povlacenja povijesti ne izgube sve ako se negdje
+        # prekinu (npr. Render ugasi pozadinski proces usred posla)
+        kraj_komada = min(day - timedelta(days=1), end)
+        if (kraj_komada - pocetak_komada).days >= 29 or day > end:
+            sync_activities(api, conn, pocetak_komada, kraj_komada)
+            broj_aktivnosti += posalji_aktivnosti_u_firestore(conn, pocetak_komada, kraj_komada)
+            pocetak_komada = day
+            meta_ref.set({"dana": broj, "aktivnosti": broj_aktivnosti}, merge=True)
+
     conn.close()
 
     meta_ref.set({
