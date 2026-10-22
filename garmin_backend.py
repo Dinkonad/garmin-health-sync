@@ -132,44 +132,50 @@ def obavi_sync(start: date, end: date):
 
     conn = sqlite3.connect(DB_PATH)
     init_db(conn)
+    broj = 0
+    broj_aktivnosti = 0
 
     try:
         api = login()
+
+        pocetak_komada = start
+        day = start
+        while day <= end:
+            sync_day(api, conn, day)
+            if posalji_dan_u_firestore(conn, day.isoformat()):
+                broj += 1
+            day += timedelta(days=1)
+            time.sleep(1)
+
+            # aktivnosti se salju u komadima od ~30 dana tijekom sinkronizacije (ne tek
+            # na kraju) - tako da duga povlacenja povijesti ne izgube sve ako se negdje
+            # prekinu (npr. Render ugasi pozadinski proces usred posla)
+            kraj_komada = min(day - timedelta(days=1), end)
+            if (kraj_komada - pocetak_komada).days >= 29 or day > end:
+                sync_activities(api, conn, pocetak_komada, kraj_komada)
+                broj_aktivnosti += posalji_aktivnosti_u_firestore(conn, pocetak_komada, kraj_komada)
+                pocetak_komada = day
+                meta_ref.set({"dana": broj, "aktivnosti": broj_aktivnosti}, merge=True)
+
+        meta_ref.set({
+            "vrijeme": firestore.SERVER_TIMESTAMP,
+            "dana": broj,
+            "aktivnosti": broj_aktivnosti,
+            "uTijeku": False,
+            "greska": firestore.DELETE_FIELD,
+        }, merge=True)
     except Exception as e:
+        # Bilo koja greška usred sinkronizacije (mreža, Garmin API, itd.) - uvijek
+        # resetiraj "uTijeku" da se status ne zaglavi zauvijek.
+        meta_ref.set({
+            "uTijeku": False,
+            "greska": str(e),
+            "vrijeme": firestore.SERVER_TIMESTAMP,
+            "dana": broj,
+            "aktivnosti": broj_aktivnosti,
+        }, merge=True)
+    finally:
         conn.close()
-        meta_ref.set({"uTijeku": False, "greska": str(e), "vrijeme": firestore.SERVER_TIMESTAMP}, merge=True)
-        return
-
-    broj = 0
-    broj_aktivnosti = 0
-    pocetak_komada = start
-    day = start
-    while day <= end:
-        sync_day(api, conn, day)
-        if posalji_dan_u_firestore(conn, day.isoformat()):
-            broj += 1
-        day += timedelta(days=1)
-        time.sleep(1)
-
-        # aktivnosti se salju u komadima od ~30 dana tijekom sinkronizacije (ne tek
-        # na kraju) - tako da duga povlacenja povijesti ne izgube sve ako se negdje
-        # prekinu (npr. Render ugasi pozadinski proces usred posla)
-        kraj_komada = min(day - timedelta(days=1), end)
-        if (kraj_komada - pocetak_komada).days >= 29 or day > end:
-            sync_activities(api, conn, pocetak_komada, kraj_komada)
-            broj_aktivnosti += posalji_aktivnosti_u_firestore(conn, pocetak_komada, kraj_komada)
-            pocetak_komada = day
-            meta_ref.set({"dana": broj, "aktivnosti": broj_aktivnosti}, merge=True)
-
-    conn.close()
-
-    meta_ref.set({
-        "vrijeme": firestore.SERVER_TIMESTAMP,
-        "dana": broj,
-        "aktivnosti": broj_aktivnosti,
-        "uTijeku": False,
-        "greska": firestore.DELETE_FIELD,
-    }, merge=True)
 
 
 @app.get("/health")
@@ -190,6 +196,17 @@ def sync(background_tasks: BackgroundTasks, days: int = 3, since: str | None = N
     background_tasks.add_task(obavi_sync, start, end)
 
     return {"ok": True, "pokrenuto": True, "od": start.isoformat(), "do": end.isoformat()}
+
+
+@app.post("/sync/reset")
+def sync_reset(authorization: str | None = Header(default=None)):
+    """Ručni izlaz iz nužde ako je status ostao zaglavljen na 'u tijeku' - npr.
+    zato što je Render ugasio proces (redeploy) usred sinkronizacije."""
+    provjeri_admina(authorization)
+    db_fs.collection("zdravlje-meta").document("zadnji-sync").set(
+        {"uTijeku": False, "greska": "Ručno resetirano."}, merge=True
+    )
+    return {"ok": True}
 
 
 # ==================== FACE ID (WebAuthn) ====================
