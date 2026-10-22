@@ -36,6 +36,39 @@ TOKEN_DIR = Path(os.getenv("GARMIN_TOKENS", Path.home() / ".garminconnect"))
 
 
 # ---------- Baza ----------
+# Stupci u "daily" koji su dodani nakon prve verzije - dodaju se migracijom
+# (ALTER TABLE) umjesto brisanja tablice, da se ne izgubi lokalna povijest.
+NOVI_STUPCI_DAILY = [
+    ("step_goal", "INTEGER"),
+    ("active_calories", "INTEGER"),
+    ("bmr_calories", "INTEGER"),
+    ("floors_climbed", "INTEGER"),
+    ("min_hr", "INTEGER"),
+    ("max_hr", "INTEGER"),
+    ("moderate_intensity_min", "INTEGER"),
+    ("vigorous_intensity_min", "INTEGER"),
+    ("avg_spo2", "REAL"),
+    ("lowest_spo2", "REAL"),
+    ("avg_respiration", "REAL"),
+    ("highest_respiration", "REAL"),
+    ("lowest_respiration", "REAL"),
+    ("stress_duration_min", "INTEGER"),
+    ("rest_stress_min", "INTEGER"),
+    ("low_stress_min", "INTEGER"),
+    ("medium_stress_min", "INTEGER"),
+    ("high_stress_min", "INTEGER"),
+    ("body_battery_charged", "INTEGER"),
+    ("body_battery_drained", "INTEGER"),
+    ("sleep_avg_respiration", "REAL"),
+    ("sleep_avg_stress", "REAL"),
+    ("sleep_deep_pct", "REAL"),
+    ("sleep_light_pct", "REAL"),
+    ("sleep_rem_pct", "REAL"),
+    ("hrv_5min_high", "INTEGER"),
+    ("hrv_feedback", "TEXT"),
+]
+
+
 def init_db(conn):
     conn.executescript(
         """
@@ -60,6 +93,22 @@ def init_db(conn):
         );
         """
     )
+    for naziv, tip in [
+        ("elevation_gain", "REAL"), ("avg_speed", "REAL"), ("max_speed", "REAL"),
+        ("aerobic_effect", "REAL"), ("anaerobic_effect", "REAL"), ("vo2max", "REAL"),
+        ("avg_power", "REAL"), ("steps", "INTEGER"),
+    ]:
+        try:
+            conn.execute(f"ALTER TABLE activities ADD COLUMN {naziv} {tip}")
+        except sqlite3.OperationalError:
+            pass
+    conn.commit()
+    for naziv, tip in NOVI_STUPCI_DAILY:
+        try:
+            conn.execute(f"ALTER TABLE daily ADD COLUMN {naziv} {tip}")
+        except sqlite3.OperationalError:
+            pass  # stupac vec postoji
+    conn.commit()
 
 
 def save_raw(conn, day, kind, data):
@@ -94,6 +143,16 @@ def safe(label, fn, *args):
         return None
 
 
+def sekunde_u_minute(s):
+    return round(s / 60) if isinstance(s, (int, float)) else None
+
+
+def postotak(dio, ukupno):
+    if not isinstance(dio, (int, float)) or not isinstance(ukupno, (int, float)) or ukupno <= 0:
+        return None
+    return round((dio / ukupno) * 100, 1)
+
+
 def sync_day(api, conn, day):
     d = day.isoformat()
     print(f"-> {d}")
@@ -110,30 +169,63 @@ def sync_day(api, conn, day):
 
     stats = stats or {}
     sdto = (sleep or {}).get("dailySleepDTO") or {}
-    score = ((sdto.get("sleepScores") or {}).get("overall") or {}).get("value")
+    sleep_scores = sdto.get("sleepScores") or {}
+    score = (sleep_scores.get("overall") or {}).get("value")
+    sleep_total = sdto.get("sleepTimeSeconds")
     hs = (hrv or {}).get("hrvSummary") or {}
 
+    podaci = {
+        "steps": stats.get("totalSteps"),
+        "distance_m": stats.get("totalDistanceMeters"),
+        "calories": stats.get("totalKilocalories"),
+        "resting_hr": stats.get("restingHeartRate"),
+        "avg_stress": stats.get("averageStressLevel"),
+        "body_battery_high": stats.get("bodyBatteryHighestValue"),
+        "body_battery_low": stats.get("bodyBatteryLowestValue"),
+        "sleep_seconds": sleep_total,
+        "deep_seconds": sdto.get("deepSleepSeconds"),
+        "light_seconds": sdto.get("lightSleepSeconds"),
+        "rem_seconds": sdto.get("remSleepSeconds"),
+        "awake_seconds": sdto.get("awakeSleepSeconds"),
+        "sleep_score": score,
+        "hrv_last_night": hs.get("lastNightAvg"),
+        "hrv_weekly_avg": hs.get("weeklyAvg"),
+        "hrv_status": hs.get("status"),
+        # ---- prosireno ----
+        "step_goal": stats.get("dailyStepGoal"),
+        "active_calories": stats.get("activeKilocalories"),
+        "bmr_calories": stats.get("bmrKilocalories"),
+        "floors_climbed": stats.get("floorsAscended"),
+        "min_hr": stats.get("minHeartRate"),
+        "max_hr": stats.get("maxHeartRate"),
+        "moderate_intensity_min": stats.get("moderateIntensityMinutes"),
+        "vigorous_intensity_min": stats.get("vigorousIntensityMinutes"),
+        "avg_spo2": stats.get("averageSpo2"),
+        "lowest_spo2": stats.get("lowestSpo2"),
+        "avg_respiration": stats.get("avgWakingRespirationValue"),
+        "highest_respiration": stats.get("highestRespirationValue"),
+        "lowest_respiration": stats.get("lowestRespirationValue"),
+        "stress_duration_min": sekunde_u_minute(stats.get("stressDuration")),
+        "rest_stress_min": sekunde_u_minute(stats.get("restStressDuration")),
+        "low_stress_min": sekunde_u_minute(stats.get("lowStressDuration")),
+        "medium_stress_min": sekunde_u_minute(stats.get("mediumStressDuration")),
+        "high_stress_min": sekunde_u_minute(stats.get("highStressDuration")),
+        "body_battery_charged": stats.get("bodyBatteryChargedValue"),
+        "body_battery_drained": stats.get("bodyBatteryDrainedValue"),
+        "sleep_avg_respiration": sdto.get("averageRespirationValue"),
+        "sleep_avg_stress": sdto.get("avgSleepStress"),
+        "sleep_deep_pct": postotak(sdto.get("deepSleepSeconds"), sleep_total),
+        "sleep_light_pct": postotak(sdto.get("lightSleepSeconds"), sleep_total),
+        "sleep_rem_pct": postotak(sdto.get("remSleepSeconds"), sleep_total),
+        "hrv_5min_high": hs.get("lastNight5MinHigh"),
+        "hrv_feedback": hs.get("feedbackPhrase"),
+    }
+
+    stupci = ", ".join(podaci.keys())
+    placeholderi = ", ".join("?" for _ in podaci)
     conn.execute(
-        "INSERT OR REPLACE INTO daily VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)",
-        (
-            d,
-            stats.get("totalSteps"),
-            stats.get("totalDistanceMeters"),
-            stats.get("totalKilocalories"),
-            stats.get("restingHeartRate"),
-            stats.get("averageStressLevel"),
-            stats.get("bodyBatteryHighestValue"),
-            stats.get("bodyBatteryLowestValue"),
-            sdto.get("sleepTimeSeconds"),
-            sdto.get("deepSleepSeconds"),
-            sdto.get("lightSleepSeconds"),
-            sdto.get("remSleepSeconds"),
-            sdto.get("awakeSleepSeconds"),
-            score,
-            hs.get("lastNightAvg"),
-            hs.get("weeklyAvg"),
-            hs.get("status"),
-        ),
+        f"INSERT OR REPLACE INTO daily (day, {stupci}) VALUES (?, {placeholderi})",
+        (d, *podaci.values()),
     )
     conn.commit()
 
@@ -141,20 +233,30 @@ def sync_day(api, conn, day):
 def sync_activities(api, conn, start, end):
     acts = safe("activities", api.get_activities_by_date, start.isoformat(), end.isoformat()) or []
     for a in acts:
+        podaci = {
+            "start_time": a.get("startTimeLocal"),
+            "name": a.get("activityName"),
+            "type": (a.get("activityType") or {}).get("typeKey"),
+            "distance_m": a.get("distance"),
+            "duration_s": a.get("duration"),
+            "calories": a.get("calories"),
+            "avg_hr": a.get("averageHR"),
+            "max_hr": a.get("maxHR"),
+            "elevation_gain": a.get("elevationGain"),
+            "avg_speed": a.get("averageSpeed"),
+            "max_speed": a.get("maxSpeed"),
+            "aerobic_effect": a.get("aerobicTrainingEffect"),
+            "anaerobic_effect": a.get("anaerobicTrainingEffect"),
+            "vo2max": a.get("vO2MaxValue"),
+            "avg_power": a.get("avgPower"),
+            "steps": a.get("steps"),
+            "json": json.dumps(a, ensure_ascii=False),
+        }
+        stupci = ", ".join(podaci.keys())
+        placeholderi = ", ".join("?" for _ in podaci)
         conn.execute(
-            "INSERT OR REPLACE INTO activities VALUES (?,?,?,?,?,?,?,?,?,?)",
-            (
-                a.get("activityId"),
-                a.get("startTimeLocal"),
-                a.get("activityName"),
-                (a.get("activityType") or {}).get("typeKey"),
-                a.get("distance"),
-                a.get("duration"),
-                a.get("calories"),
-                a.get("averageHR"),
-                a.get("maxHR"),
-                json.dumps(a, ensure_ascii=False),
-            ),
+            f"INSERT OR REPLACE INTO activities (activity_id, {stupci}) VALUES (?, {placeholderi})",
+            (a.get("activityId"), *podaci.values()),
         )
     conn.commit()
     print(f"-> aktivnosti: {len(acts)}")

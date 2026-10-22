@@ -100,6 +100,23 @@ def posalji_dan_u_firestore(conn, dan: str):
     return True
 
 
+def posalji_aktivnosti_u_firestore(conn, start: date, end: date):
+    cur = conn.execute(
+        "SELECT * FROM activities WHERE start_time >= ? AND start_time < ? ORDER BY start_time",
+        (start.isoformat(), (end + timedelta(days=1)).isoformat()),
+    )
+    cols = [c[0] for c in cur.description]
+    broj = 0
+    for row in cur.fetchall():
+        podaci = dict(zip(cols, row))
+        activity_id = podaci.pop("activity_id")
+        podaci.pop("json", None)  # prevelik/nepotreban u Firestoreu
+        podaci["azurirano"] = firestore.SERVER_TIMESTAMP
+        db_fs.collection("zdravlje-aktivnosti").document(str(activity_id)).set(podaci, merge=True)
+        broj += 1
+    return broj
+
+
 def obavi_sync(start: date, end: date):
     meta_ref = db_fs.collection("zdravlje-meta").document("zadnji-sync")
     meta_ref.set({
@@ -129,11 +146,13 @@ def obavi_sync(start: date, end: date):
         time.sleep(1)
 
     sync_activities(api, conn, start, end)
+    broj_aktivnosti = posalji_aktivnosti_u_firestore(conn, start, end)
     conn.close()
 
     meta_ref.set({
         "vrijeme": firestore.SERVER_TIMESTAMP,
         "dana": broj,
+        "aktivnosti": broj_aktivnosti,
         "uTijeku": False,
         "greska": firestore.DELETE_FIELD,
     }, merge=True)
