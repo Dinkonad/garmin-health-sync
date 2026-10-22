@@ -1,0 +1,7 @@
+.env
+.venv/
+garmin.db
+report.html
+*.csv
+__pycache__/
+serviceAccountKey.json

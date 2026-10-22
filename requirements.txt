@@ -1,0 +1,5 @@
+garminconnect
+python-dotenv
+fastapi
+uvicorn[standard]
+firebase-admin
