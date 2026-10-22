@@ -346,6 +346,12 @@ def ukloni_push_pretplatu(endpoint: str):
 
 
 def posalji_push_svima(naslov: str, tijelo: str) -> int:
+    if not Path(VAPID_PRIVATE_KEY_PATH).is_file():
+        raise RuntimeError(
+            f"VAPID privatni ključ nije pronađen na serveru (očekivana putanja: {VAPID_PRIVATE_KEY_PATH}). "
+            "Provjeri Secret File i VAPID_PRIVATE_KEY_PATH na Renderu."
+        )
+
     poslano = 0
     for pretplata in dohvati_push_pretplate():
         try:
@@ -362,6 +368,8 @@ def posalji_push_svima(naslov: str, tijelo: str) -> int:
                 ukloni_push_pretplatu(pretplata.get("endpoint"))
             else:
                 print(f"Push greška: {e}")
+        except Exception as e:
+            print(f"Push greška (neočekivano): {e}")
     return poslano
 
 
@@ -387,10 +395,19 @@ def provjeri_kilometrazu(x_cron_secret: str | None = Header(default=None)):
     if upisi:
         return {"ok": True, "poslano": False, "razlog": "već upisano"}
 
-    broj = posalji_push_svima(
-        "Upiši kilometražu",
-        f"Još nisi upisao stanje kilometara za {mjesec_str}. Otvori Auto prije kraja mjeseca.",
-    )
+    nazivi_mjeseci = [
+        "siječanj", "veljača", "ožujak", "travanj", "svibanj", "lipanj",
+        "srpanj", "kolovoz", "rujan", "listopad", "studeni", "prosinac",
+    ]
+    mjesec_citljivo = f"{nazivi_mjeseci[danas.month - 1]} {danas.year}"
+
+    try:
+        broj = posalji_push_svima(
+            "Upiši kilometražu",
+            f"Još nisi upisao stanje kilometara za {mjesec_citljivo}. Otvori Auto prije kraja mjeseca.",
+        )
+    except RuntimeError as e:
+        raise HTTPException(status_code=500, detail=str(e))
     return {"ok": True, "poslano": broj > 0, "broj_uredjaja": broj}
 
 
@@ -398,5 +415,8 @@ def provjeri_kilometrazu(x_cron_secret: str | None = Header(default=None)):
 def push_test(authorization: str | None = Header(default=None)):
     """Ručno testiranje push notifikacija iz app-a - privremeni endpoint."""
     provjeri_admina(authorization)
-    broj = posalji_push_svima("Test notifikacija", "Ako ovo vidiš, push notifikacije rade!")
+    try:
+        broj = posalji_push_svima("Test notifikacija", "Ako ovo vidiš, push notifikacije rade!")
+    except RuntimeError as e:
+        raise HTTPException(status_code=500, detail=str(e))
     return {"ok": True, "broj_uredjaja": broj}

@@ -2,8 +2,8 @@ name: Podsjetnik za kilometražu
 
 on:
   schedule:
-    # 18:00 po srednjoeuropskom (ljetnom) vremenu ~= 16:00 UTC
-    - cron: '0 16 * * *'
+    # ~12:00 (podne) po srednjoeuropskom vremenu ~= 11:00 UTC
+    - cron: '0 11 * * *'
   workflow_dispatch: {}
 
 jobs:
