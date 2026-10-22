@@ -30,6 +30,7 @@ from fastapi import BackgroundTasks, FastAPI, Header, HTTPException, Request
 from fastapi.middleware.cors import CORSMiddleware
 from firebase_admin import auth as fb_auth
 from firebase_admin import credentials, firestore
+from pywebpush import WebPushException, webpush
 from webauthn.helpers import (
     parse_authentication_credential_json,
     parse_registration_credential_json,
@@ -49,6 +50,9 @@ WEBAUTHN_RP_ID = os.getenv("WEBAUTHN_RP_ID", "nagyphotos.netlify.app")
 WEBAUTHN_RP_NAME = "Nagy Photos"
 
 FIREBASE_CREDENTIALS_PATH = os.getenv("FIREBASE_CREDENTIALS_PATH", str(BASE_DIR / "serviceAccountKey.json"))
+VAPID_PRIVATE_KEY_PATH = os.getenv("VAPID_PRIVATE_KEY_PATH", str(BASE_DIR / "vapid_private.pem"))
+VAPID_SUBJECT = os.getenv("VAPID_SUBJECT", f"mailto:{ADMIN_EMAIL}")
+CRON_SECRET = os.getenv("CRON_SECRET", "")
 
 cred = credentials.Certificate(FIREBASE_CREDENTIALS_PATH)
 firebase_admin.initialize_app(cred)
@@ -322,3 +326,77 @@ async def faceid_login_verify(request: Request):
     user = fb_auth.get_user_by_email(ADMIN_EMAIL)
     token = fb_auth.create_custom_token(user.uid)
     return {"token": token.decode() if isinstance(token, bytes) else token}
+
+
+# ==================== PUSH NOTIFIKACIJE (Web Push) ====================
+# Pretplate (po uređaju) sprema sam Vue app direktno u Firestore
+# security/push-subscriptions (isti obrazac kao webauthn-credentials).
+# Backend samo čita tu listu i šalje push preko standardnog, besplatnog
+# Web Push protokola (VAPID) - bez ikakvog plaćenog servisa.
+
+def dohvati_push_pretplate() -> list:
+    snap = db_fs.collection("security").document("push-subscriptions").get()
+    return (snap.to_dict() or {}).get("pretplate", []) if snap.exists else []
+
+
+def ukloni_push_pretplatu(endpoint: str):
+    trenutne = dohvati_push_pretplate()
+    filtrirane = [p for p in trenutne if p.get("endpoint") != endpoint]
+    db_fs.collection("security").document("push-subscriptions").set({"pretplate": filtrirane}, merge=True)
+
+
+def posalji_push_svima(naslov: str, tijelo: str) -> int:
+    poslano = 0
+    for pretplata in dohvati_push_pretplate():
+        try:
+            webpush(
+                subscription_info=pretplata,
+                data=json.dumps({"naslov": naslov, "tijelo": tijelo}),
+                vapid_private_key=VAPID_PRIVATE_KEY_PATH,
+                vapid_claims={"sub": VAPID_SUBJECT},
+            )
+            poslano += 1
+        except WebPushException as e:
+            status = getattr(e.response, "status_code", None)
+            if status in (404, 410):
+                ukloni_push_pretplatu(pretplata.get("endpoint"))
+            else:
+                print(f"Push greška: {e}")
+    return poslano
+
+
+@app.get("/push/provjeri-kilometrazu")
+def provjeri_kilometrazu(x_cron_secret: str | None = Header(default=None)):
+    """Poziva se jednom dnevno (GitHub Actions cron). Ako je blizu kraja mjeseca
+    i još nema upisa kilometraže za tekući mjesec, pošalje podsjetnik."""
+    if CRON_SECRET and x_cron_secret != CRON_SECRET:
+        raise HTTPException(status_code=401, detail="Neispravna tajna.")
+
+    danas = date.today()
+    if danas.day < 27:
+        return {"ok": True, "poslano": False, "razlog": "nije još 27. u mjesecu"}
+
+    mjesec_str = f"{danas.year}-{danas.month:02d}"
+    upisi = list(
+        db_fs.collection("auto")
+        .where("tip", "==", "ocitanje-km")
+        .where("mjesec", "==", mjesec_str)
+        .limit(1)
+        .stream()
+    )
+    if upisi:
+        return {"ok": True, "poslano": False, "razlog": "već upisano"}
+
+    broj = posalji_push_svima(
+        "Upiši kilometražu",
+        f"Još nisi upisao stanje kilometara za {mjesec_str}. Otvori Auto prije kraja mjeseca.",
+    )
+    return {"ok": True, "poslano": broj > 0, "broj_uredjaja": broj}
+
+
+@app.post("/push/test")
+def push_test(authorization: str | None = Header(default=None)):
+    """Ručno testiranje push notifikacija iz app-a - privremeni endpoint."""
+    provjeri_admina(authorization)
+    broj = posalji_push_svima("Test notifikacija", "Ako ovo vidiš, push notifikacije rade!")
+    return {"ok": True, "broj_uredjaja": broj}

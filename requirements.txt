@@ -4,3 +4,4 @@ fastapi
 uvicorn[standard]
 firebase-admin
 webauthn==3.0.1
+pywebpush==2.5.0
