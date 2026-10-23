@@ -17,19 +17,23 @@ Potrebne env varijable (postavi ih u Render dashboardu, NIKAD u git):
                                       na Renderu: putanja do "Secret File")
 """
 import base64
+import hashlib
 import json
 import os
 import sqlite3
 import time
-from datetime import date, timedelta
+from datetime import date, datetime, timedelta
 from pathlib import Path
 
 import firebase_admin
+import recurring_ical_events
+import requests
 import webauthn
 from fastapi import BackgroundTasks, FastAPI, Header, HTTPException, Request
 from fastapi.middleware.cors import CORSMiddleware
 from firebase_admin import auth as fb_auth
 from firebase_admin import credentials, firestore
+from icalendar import Calendar
 from pywebpush import WebPushException, webpush
 from webauthn.helpers import (
     parse_authentication_credential_json,
@@ -53,6 +57,9 @@ FIREBASE_CREDENTIALS_PATH = os.getenv("FIREBASE_CREDENTIALS_PATH", str(BASE_DIR 
 VAPID_PRIVATE_KEY_PATH = os.getenv("VAPID_PRIVATE_KEY_PATH", str(BASE_DIR / "vapid_private.pem"))
 VAPID_SUBJECT = os.getenv("VAPID_SUBJECT", f"mailto:{ADMIN_EMAIL}")
 CRON_SECRET = os.getenv("CRON_SECRET", "")
+ICLOUD_KALENDARI = json.loads(os.getenv("ICLOUD_KALENDARI", "{}"))
+VREME_LAT = os.getenv("VREME_LAT", "44.8666")
+VREME_LON = os.getenv("VREME_LON", "13.8496")
 
 cred = credentials.Certificate(FIREBASE_CREDENTIALS_PATH)
 firebase_admin.initialize_app(cred)
@@ -440,3 +447,158 @@ def push_test(authorization: str | None = Header(default=None)):
     except RuntimeError as e:
         raise HTTPException(status_code=500, detail=str(e))
     return {"ok": True, "broj_uredjaja": broj}
+
+
+# ==================== KALENDAR (iCloud "Public Calendar" uvoz) ====================
+# Svaki kalendar u ICLOUD_KALENDARI (naziv -> webcal link, pretvoren u https) se
+# periodicki povuce i njegovi dogadaji (ukljucujuci ponavljajuce, npr. raspored
+# predavanja) se spreme u Firestore kolekciju "kalendar-eventi".
+
+def dohvati_i_spremi_kalendare():
+    if not ICLOUD_KALENDARI:
+        return {"ok": False, "razlog": "ICLOUD_KALENDARI nije postavljen."}
+
+    pocetak_raspona = datetime.now() - timedelta(days=14)
+    kraj_raspona = datetime.now() + timedelta(days=120)
+
+    ukupno = 0
+    for naziv, webcal_link in ICLOUD_KALENDARI.items():
+        https_link = webcal_link.replace("webcal://", "https://")
+        try:
+            odgovor = requests.get(https_link, timeout=20)
+            odgovor.raise_for_status()
+            kalendar = Calendar.from_ical(odgovor.content)
+            dogadjaji = recurring_ical_events.of(kalendar).between(pocetak_raspona, kraj_raspona)
+        except Exception as e:
+            print(f"Greška pri dohvaćanju kalendara '{naziv}': {e}")
+            continue
+
+        batch = db_fs.batch()
+        for dogadjaj in dogadjaji:
+            naslov = str(dogadjaj.get("SUMMARY", "") or "Bez naziva")
+            opis = str(dogadjaj.get("DESCRIPTION", "") or "")
+            lokacija = str(dogadjaj.get("LOCATION", "") or "")
+            dtstart = dogadjaj["DTSTART"].dt
+            dtend = dogadjaj["DTEND"].dt if dogadjaj.get("DTEND") else dtstart
+            cijeli_dan = not isinstance(dtstart, datetime)
+            pocetak_iso = dtstart.isoformat()
+            dan_str = dtstart.isoformat() if cijeli_dan else dtstart.date().isoformat()
+
+            # stabilan ID iz naziva kalendara + UID + pocetka (da se azurira, ne duplicira)
+            sirovi_uid = f"{naziv}|{dogadjaj.get('UID', '')}|{pocetak_iso}"
+            doc_id = hashlib.sha1(sirovi_uid.encode()).hexdigest()[:24]
+
+            ref = db_fs.collection("kalendar-eventi").document(doc_id)
+            batch.set(ref, {
+                "kalendar": naziv,
+                "naslov": naslov,
+                "opis": opis,
+                "lokacija": lokacija,
+                "pocetak": pocetak_iso,
+                "kraj": dtend.isoformat(),
+                "cijeliDan": cijeli_dan,
+                "dan": dan_str,
+                "azurirano": firestore.SERVER_TIMESTAMP,
+            })
+            ukupno += 1
+        batch.commit()
+
+    db_fs.collection("kalendar-meta").document("zadnja-sinkronizacija").set({
+        "vrijeme": firestore.SERVER_TIMESTAMP,
+        "ukupnoEventa": ukupno,
+    }, merge=True)
+    return {"ok": True, "ukupnoEventa": ukupno}
+
+
+@app.get("/kalendar/osvjezi")
+def kalendar_osvjezi(x_cron_secret: str | None = Header(default=None)):
+    """Poziva se jednom dnevno (GitHub Actions cron) - povuce sve iCloud kalendare."""
+    if CRON_SECRET and x_cron_secret != CRON_SECRET:
+        raise HTTPException(status_code=401, detail="Neispravna tajna.")
+    return dohvati_i_spremi_kalendare()
+
+
+@app.post("/kalendar/osvjezi-rucno")
+def kalendar_osvjezi_rucno(authorization: str | None = Header(default=None)):
+    """Ručno osvježavanje iz app-a (gumb)."""
+    provjeri_admina(authorization)
+    return dohvati_i_spremi_kalendare()
+
+
+# ==================== VRIJEME (Open-Meteo, besplatno bez ključa) ====================
+WMO_OPISI = {
+    0: "Vedro ☀️", 1: "Pretežno vedro 🌤️", 2: "Djelomično oblačno ⛅", 3: "Oblačno ☁️",
+    45: "Magla 🌫️", 48: "Magla s injem 🌫️",
+    51: "Slaba rosulja 🌦️", 53: "Rosulja 🌦️", 55: "Jaka rosulja 🌧️",
+    61: "Slaba kiša 🌦️", 63: "Kiša 🌧️", 65: "Jaka kiša 🌧️",
+    71: "Slab snijeg 🌨️", 73: "Snijeg 🌨️", 75: "Jak snijeg ❄️",
+    80: "Pljuskovi 🌦️", 81: "Jači pljuskovi 🌧️", 82: "Obilni pljuskovi ⛈️",
+    95: "Grmljavina ⛈️", 96: "Grmljavina s tučom ⛈️", 99: "Jaka grmljavina s tučom ⛈️",
+}
+
+
+def dohvati_vrijeme_sutra():
+    try:
+        odgovor = requests.get(
+            "https://api.open-meteo.com/v1/forecast",
+            params={
+                "latitude": VREME_LAT,
+                "longitude": VREME_LON,
+                "daily": "weathercode,temperature_2m_max,temperature_2m_min,precipitation_probability_max",
+                "timezone": "Europe/Zagreb",
+                "forecast_days": 2,
+            },
+            timeout=15,
+        )
+        odgovor.raise_for_status()
+        podaci = odgovor.json()["daily"]
+        kod = podaci["weathercode"][1]
+        tmax = round(podaci["temperature_2m_max"][1])
+        tmin = round(podaci["temperature_2m_min"][1])
+        kisa = podaci["precipitation_probability_max"][1]
+        opis = WMO_OPISI.get(kod, "")
+        return f"{opis} {tmin}°C-{tmax}°C, {kisa}% kiše"
+    except Exception as e:
+        print(f"Greška pri dohvaćanju vremena: {e}")
+        return None
+
+
+# ==================== VEČERNJI PREGLED (push u 20h) ====================
+@app.get("/push/vecernji-pregled")
+def push_vecernji_pregled(x_cron_secret: str | None = Header(default=None)):
+    """Poziva se jednom dnevno u ~20h (GitHub Actions cron) - šalje push sa
+    sutrašnjim eventima iz svih povezanih kalendara i vremenskom prognozom."""
+    if CRON_SECRET and x_cron_secret != CRON_SECRET:
+        raise HTTPException(status_code=401, detail="Neispravna tajna.")
+
+    sutra = date.today() + timedelta(days=1)
+    sutra_str = sutra.isoformat()
+
+    eventi_dok = list(db_fs.collection("kalendar-eventi").where("dan", "==", sutra_str).stream())
+    eventi = sorted(
+        [d.to_dict() for d in eventi_dok],
+        key=lambda e: e.get("pocetak", "")
+    )
+
+    vrijeme_tekst = dohvati_vrijeme_sutra()
+
+    if eventi:
+        stavke = []
+        for e in eventi:
+            if e.get("cijeliDan"):
+                stavke.append(e["naslov"])
+            else:
+                vrijeme_poc = e["pocetak"][11:16] if len(e["pocetak"]) > 16 else ""
+                stavke.append(f"{vrijeme_poc} {e['naslov']}".strip())
+        tijelo = "📅 " + " · ".join(stavke)
+    else:
+        tijelo = "Nemaš ništa zakazano. Uživaj u sutrašnjem danu! 😊"
+
+    if vrijeme_tekst:
+        tijelo += f"\n🌤️ {vrijeme_tekst}"
+
+    try:
+        broj = posalji_push_svima("Sutra", tijelo)
+    except RuntimeError as e:
+        raise HTTPException(status_code=500, detail=str(e))
+    return {"ok": True, "broj_uredjaja": broj, "broj_eventa": len(eventi)}

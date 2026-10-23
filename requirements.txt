@@ -5,3 +5,6 @@ uvicorn[standard]
 firebase-admin
 webauthn==3.0.1
 pywebpush==2.5.0
+icalendar==7.3.0
+requests==2.34.2
+recurring-ical-events==3.8.2

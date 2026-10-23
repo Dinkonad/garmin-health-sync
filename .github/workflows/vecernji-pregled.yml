@@ -1,0 +1,16 @@
+name: Večernji pregled sutrašnjeg dana
+
+on:
+  schedule:
+    # ~20:00 po srednjoeuropskom vremenu ~= 19:00 UTC
+    - cron: '0 19 * * *'
+  workflow_dispatch: {}
+
+jobs:
+  posalji:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Pozovi backend endpoint
+        run: |
+          curl -sf -X GET "https://garmin-health-sync-xlyl.onrender.com/push/vecernji-pregled" \
+            -H "x-cron-secret: ${{ secrets.CRON_SECRET }}"

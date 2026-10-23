@@ -1,0 +1,16 @@
+name: Sinkronizacija kalendara
+
+on:
+  schedule:
+    # 4x dnevno - drži eventi iz iCloud kalendara svježe u app-u
+    - cron: '0 */6 * * *'
+  workflow_dispatch: {}
+
+jobs:
+  sync:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Pozovi backend endpoint
+        run: |
+          curl -sf -X GET "https://garmin-health-sync-xlyl.onrender.com/kalendar/osvjezi" \
+            -H "x-cron-secret: ${{ secrets.CRON_SECRET }}"
