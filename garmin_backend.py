@@ -22,7 +22,7 @@ import json
 import os
 import sqlite3
 import time
-from datetime import date, datetime, timedelta
+from datetime import date, datetime, time, timedelta
 from pathlib import Path
 
 import firebase_admin
@@ -493,7 +493,12 @@ def dohvati_i_spremi_kalendare():
                 zadnji_dan = (dtend - timedelta(days=1)) if dtend > dtstart else dtstart
             else:
                 prvi_dan = dtstart.date()
-                zadnji_dan = dtend.date()
+                # ako event zavrsava tocno u ponoc, ne racuna se kao da "ulazi" u taj dan
+                # (npr. rodjendan 23:00-00:00 je jedan dan, ne dva)
+                if dtend.time() == time(0, 0) and dtend.date() > dtstart.date():
+                    zadnji_dan = (dtend - timedelta(days=1)).date()
+                else:
+                    zadnji_dan = dtend.date()
 
             dani_pokriveni = []
             tekuci_dan = prvi_dan
