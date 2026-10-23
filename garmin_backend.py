@@ -620,7 +620,7 @@ def push_vecernji_pregled(x_cron_secret: str | None = Header(default=None)):
             else:
                 vrijeme_poc = e["pocetak"][11:16] if len(e["pocetak"]) > 16 else ""
                 stavke.append(f"{vrijeme_poc} {e['naslov']}".strip())
-        tijelo = "📅 " + " · ".join(stavke)
+        tijelo = "\n".join(f"📅 {s}" for s in stavke)
     else:
         tijelo = "Nemaš ništa zakazano. Uživaj u sutrašnjem danu! 😊"
 
@@ -631,4 +631,4 @@ def push_vecernji_pregled(x_cron_secret: str | None = Header(default=None)):
         broj = posalji_push_svima("Sutra", tijelo)
     except RuntimeError as e:
         raise HTTPException(status_code=500, detail=str(e))
-    return {"ok": True, "broj_uredjaja": broj, "broj_eventa": len(eventi)}
+    return {"ok": True, "broj_uredjaja": broj, "broj_eventa": len(eventi), "vrijeme_debug": vrijeme_tekst}
