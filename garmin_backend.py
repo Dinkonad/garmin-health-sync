@@ -70,6 +70,9 @@ DOZVOLJENI_ORIGINI = [
 app.add_middleware(
     CORSMiddleware,
     allow_origins=DOZVOLJENI_ORIGINI,
+    # Vite dev server mijenja port kad je prethodni zauzet (5173, 5174, ...) -
+    # umjesto nabrajanja svakog, dopusti bilo koji localhost port za dev.
+    allow_origin_regex=r"http://localhost:\d+",
     allow_methods=["GET", "POST"],
     allow_headers=["*"],
 )
