@@ -22,8 +22,10 @@ import json
 import os
 import sqlite3
 import time
-from datetime import date, datetime, time, timedelta
+from datetime import date, datetime, timedelta
+from datetime import time as dt_time
 from pathlib import Path
+from zoneinfo import ZoneInfo
 
 import firebase_admin
 import recurring_ical_events
@@ -495,7 +497,7 @@ def dohvati_i_spremi_kalendare():
                 prvi_dan = dtstart.date()
                 # ako event zavrsava tocno u ponoc, ne racuna se kao da "ulazi" u taj dan
                 # (npr. rodjendan 23:00-00:00 je jedan dan, ne dva)
-                if dtend.time() == time(0, 0) and dtend.date() > dtstart.date():
+                if dtend.time() == dt_time(0, 0) and dtend.date() > dtstart.date():
                     zadnji_dan = (dtend - timedelta(days=1)).date()
                 else:
                     zadnji_dan = dtend.date()
@@ -555,39 +557,71 @@ def kalendar_osvjezi_rucno(authorization: str | None = Header(default=None)):
     return dohvati_i_spremi_kalendare()
 
 
-# ==================== VRIJEME (Open-Meteo, besplatno bez ključa) ====================
-WMO_OPISI = {
-    0: "Vedro ☀️", 1: "Pretežno vedro 🌤️", 2: "Djelomično oblačno ⛅", 3: "Oblačno ☁️",
-    45: "Magla 🌫️", 48: "Magla s injem 🌫️",
-    51: "Slaba rosulja 🌦️", 53: "Rosulja 🌦️", 55: "Jaka rosulja 🌧️",
-    61: "Slaba kiša 🌦️", 63: "Kiša 🌧️", 65: "Jaka kiša 🌧️",
-    71: "Slab snijeg 🌨️", 73: "Snijeg 🌨️", 75: "Jak snijeg ❄️",
-    80: "Pljuskovi 🌦️", 81: "Jači pljuskovi 🌧️", 82: "Obilni pljuskovi ⛈️",
-    95: "Grmljavina ⛈️", 96: "Grmljavina s tučom ⛈️", 99: "Jaka grmljavina s tučom ⛈️",
+# ==================== VRIJEME (Met.no/Yr, besplatno bez ključa) ====================
+# Open-Meteo je ranije koristen, ali dijeli IP s puno drugih Render app-ova pa je
+# brzo udario u njihov dnevni limit (429). Met.no limitira po User-Agentu, ne po IP-u.
+SYMBOL_OPISI = {
+    "clearsky": "Vedro ☀️", "fair": "Pretežno vedro 🌤️", "partlycloudy": "Djelomično oblačno ⛅",
+    "cloudy": "Oblačno ☁️", "fog": "Magla 🌫️",
+    "lightrainshowers": "Slabi pljuskovi 🌦️", "rainshowers": "Pljuskovi 🌦️", "heavyrainshowers": "Jaki pljuskovi 🌧️",
+    "lightrainshowersandthunder": "Slabi pljuskovi s grmljavinom ⛈️", "rainshowersandthunder": "Pljuskovi s grmljavinom ⛈️",
+    "heavyrainshowersandthunder": "Jaki pljuskovi s grmljavinom ⛈️",
+    "lightsleetshowers": "Slaba susnježica 🌨️", "sleetshowers": "Susnježica 🌨️", "heavysleetshowers": "Jaka susnježica 🌨️",
+    "lightsnowshowers": "Slab snijeg 🌨️", "snowshowers": "Snježni pljuskovi 🌨️", "heavysnowshowers": "Jak snijeg ❄️",
+    "lightrain": "Slaba kiša 🌦️", "rain": "Kiša 🌧️", "heavyrain": "Jaka kiša 🌧️",
+    "lightrainandthunder": "Slaba kiša s grmljavinom ⛈️", "rainandthunder": "Kiša s grmljavinom ⛈️",
+    "heavyrainandthunder": "Jaka kiša s grmljavinom ⛈️",
+    "lightsleet": "Slaba susnježica 🌨️", "sleet": "Susnježica 🌨️", "heavysleet": "Jaka susnježica 🌨️",
+    "lightsnow": "Slab snijeg 🌨️", "snow": "Snijeg ❄️", "heavysnow": "Jak snijeg ❄️",
+    "sleetshowersandthunder": "Susnježica s grmljavinom ⛈️", "snowshowersandthunder": "Snježni pljuskovi s grmljavinom ⛈️",
+    "snowandthunder": "Snijeg s grmljavinom ⛈️",
 }
 
 
 def dohvati_vrijeme_sutra():
     try:
         odgovor = requests.get(
-            "https://api.open-meteo.com/v1/forecast",
-            params={
-                "latitude": VREME_LAT,
-                "longitude": VREME_LON,
-                "daily": "weathercode,temperature_2m_max,temperature_2m_min,precipitation_probability_max",
-                "timezone": "Europe/Zagreb",
-                "forecast_days": 2,
-            },
+            "https://api.met.no/weatherapi/locationforecast/2.0/compact",
+            params={"lat": VREME_LAT, "lon": VREME_LON},
+            headers={"User-Agent": "NagyPhotosApp/1.0 naddinko@gmail.com"},
             timeout=15,
         )
         odgovor.raise_for_status()
-        podaci = odgovor.json()["daily"]
-        kod = podaci["weathercode"][1]
-        tmax = round(podaci["temperature_2m_max"][1])
-        tmin = round(podaci["temperature_2m_min"][1])
-        kisa = podaci["precipitation_probability_max"][1]
-        opis = WMO_OPISI.get(kod, "")
-        return f"{opis} {tmin}°C-{tmax}°C, {kisa}% kiše"
+        podaci = odgovor.json()["properties"]["timeseries"]
+
+        zagreb = ZoneInfo("Europe/Zagreb")
+        sutra = (datetime.now(zagreb) + timedelta(days=1)).date()
+
+        temperature = []
+        kisa_mm = 0.0
+        simbol_podne = None
+        najmanja_razlika = None
+
+        for stavka in podaci:
+            vrijeme_lokalno = datetime.fromisoformat(stavka["time"].replace("Z", "+00:00")).astimezone(zagreb)
+            if vrijeme_lokalno.date() != sutra:
+                continue
+            temperature.append(stavka["data"]["instant"]["details"]["air_temperature"])
+
+            next_1h = stavka["data"].get("next_1_hours")
+            if next_1h:
+                kisa_mm += next_1h.get("details", {}).get("precipitation_amount") or 0
+
+            razlika = abs(vrijeme_lokalno.hour - 12)
+            if najmanja_razlika is None or razlika < najmanja_razlika:
+                najmanja_razlika = razlika
+                sazetak = stavka["data"].get("next_6_hours") or stavka["data"].get("next_1_hours")
+                if sazetak:
+                    simbol_podne = sazetak["summary"]["symbol_code"]
+
+        if not temperature:
+            return None
+
+        tmin = round(min(temperature))
+        tmax = round(max(temperature))
+        osnovni_kod = (simbol_podne or "cloudy").replace("_day", "").replace("_night", "").replace("_polartwilight", "")
+        opis = SYMBOL_OPISI.get(osnovni_kod, "Vrijeme ☁️")
+        return f"{opis} {tmin}°C-{tmax}°C, {round(kisa_mm, 1)}mm kiše"
     except Exception as e:
         print(f"Greška pri dohvaćanju vremena: {e}")
         return None
@@ -595,26 +629,8 @@ def dohvati_vrijeme_sutra():
 
 @app.get("/push/vrijeme-debug")
 def push_vrijeme_debug():
-    """PRIVREMENO - dijagnostika zasto prognoza ne stize, bez slanja push notifikacije."""
-    try:
-        odgovor = requests.get(
-            "https://api.open-meteo.com/v1/forecast",
-            params={
-                "latitude": VREME_LAT,
-                "longitude": VREME_LON,
-                "daily": "weathercode,temperature_2m_max,temperature_2m_min,precipitation_probability_max",
-                "timezone": "Europe/Zagreb",
-                "forecast_days": 2,
-            },
-            timeout=15,
-        )
-        return {
-            "lat": VREME_LAT, "lon": VREME_LON,
-            "status": odgovor.status_code,
-            "tijelo": odgovor.text[:500],
-        }
-    except Exception as e:
-        return {"lat": VREME_LAT, "lon": VREME_LON, "greska": f"{type(e).__name__}: {e}"}
+    """PRIVREMENO - dijagnostika prognoze, bez slanja push notifikacije."""
+    return {"lat": VREME_LAT, "lon": VREME_LON, "rezultat": dohvati_vrijeme_sutra()}
 
 
 # ==================== VEČERNJI PREGLED (push u 20h) ====================
