@@ -593,6 +593,30 @@ def dohvati_vrijeme_sutra():
         return None
 
 
+@app.get("/push/vrijeme-debug")
+def push_vrijeme_debug():
+    """PRIVREMENO - dijagnostika zasto prognoza ne stize, bez slanja push notifikacije."""
+    try:
+        odgovor = requests.get(
+            "https://api.open-meteo.com/v1/forecast",
+            params={
+                "latitude": VREME_LAT,
+                "longitude": VREME_LON,
+                "daily": "weathercode,temperature_2m_max,temperature_2m_min,precipitation_probability_max",
+                "timezone": "Europe/Zagreb",
+                "forecast_days": 2,
+            },
+            timeout=15,
+        )
+        return {
+            "lat": VREME_LAT, "lon": VREME_LON,
+            "status": odgovor.status_code,
+            "tijelo": odgovor.text[:500],
+        }
+    except Exception as e:
+        return {"lat": VREME_LAT, "lon": VREME_LON, "greska": f"{type(e).__name__}: {e}"}
+
+
 # ==================== VEČERNJI PREGLED (push u 20h) ====================
 @app.get("/push/vecernji-pregled")
 def push_vecernji_pregled(x_cron_secret: str | None = Header(default=None)):
