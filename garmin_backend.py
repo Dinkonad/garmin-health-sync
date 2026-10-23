@@ -474,6 +474,7 @@ def dohvati_i_spremi_kalendare():
             continue
 
         batch = db_fs.batch()
+        u_batchu = 0
         for dogadjaj in dogadjaji:
             naslov = str(dogadjaj.get("SUMMARY", "") or "Bez naziva")
             opis = str(dogadjaj.get("DESCRIPTION", "") or "")
@@ -482,25 +483,49 @@ def dohvati_i_spremi_kalendare():
             dtend = dogadjaj["DTEND"].dt if dogadjaj.get("DTEND") else dtstart
             cijeli_dan = not isinstance(dtstart, datetime)
             pocetak_iso = dtstart.isoformat()
-            dan_str = dtstart.isoformat() if cijeli_dan else dtstart.date().isoformat()
+            sirovi_uid_base = f"{naziv}|{dogadjaj.get('UID', '')}|{pocetak_iso}"
 
-            # stabilan ID iz naziva kalendara + UID + pocetka (da se azurira, ne duplicira)
-            sirovi_uid = f"{naziv}|{dogadjaj.get('UID', '')}|{pocetak_iso}"
-            doc_id = hashlib.sha1(sirovi_uid.encode()).hexdigest()[:24]
+            # dani koje event pokriva - vise-dnevni event (npr. studio rezervacija
+            # 6.-9.11.) mora se prikazati SVAKI od tih dana, ne samo prvi
+            if cijeli_dan:
+                prvi_dan = dtstart
+                # DTEND kod cijelodnevnih eventa je ekskluzivan (dan nakon zadnjeg) po iCal standardu
+                zadnji_dan = (dtend - timedelta(days=1)) if dtend > dtstart else dtstart
+            else:
+                prvi_dan = dtstart.date()
+                zadnji_dan = dtend.date()
 
-            ref = db_fs.collection("kalendar-eventi").document(doc_id)
-            batch.set(ref, {
-                "kalendar": naziv,
-                "naslov": naslov,
-                "opis": opis,
-                "lokacija": lokacija,
-                "pocetak": pocetak_iso,
-                "kraj": dtend.isoformat(),
-                "cijeliDan": cijeli_dan,
-                "dan": dan_str,
-                "azurirano": firestore.SERVER_TIMESTAMP,
-            })
-            ukupno += 1
+            dani_pokriveni = []
+            tekuci_dan = prvi_dan
+            brojac = 0
+            while tekuci_dan <= zadnji_dan and brojac < 60:
+                dani_pokriveni.append(tekuci_dan.isoformat())
+                tekuci_dan += timedelta(days=1)
+                brojac += 1
+            if not dani_pokriveni:
+                dani_pokriveni = [prvi_dan.isoformat()]
+
+            for dan_str in dani_pokriveni:
+                doc_id = hashlib.sha1(f"{sirovi_uid_base}|{dan_str}".encode()).hexdigest()[:24]
+                ref = db_fs.collection("kalendar-eventi").document(doc_id)
+                batch.set(ref, {
+                    "kalendar": naziv,
+                    "naslov": naslov,
+                    "opis": opis,
+                    "lokacija": lokacija,
+                    "pocetak": pocetak_iso,
+                    "kraj": dtend.isoformat(),
+                    "cijeliDan": cijeli_dan,
+                    "dan": dan_str,
+                    "visednevni": len(dani_pokriveni) > 1,
+                    "azurirano": firestore.SERVER_TIMESTAMP,
+                })
+                ukupno += 1
+                u_batchu += 1
+                if u_batchu >= 400:
+                    batch.commit()
+                    batch = db_fs.batch()
+                    u_batchu = 0
         batch.commit()
 
     db_fs.collection("kalendar-meta").document("zadnja-sinkronizacija").set({
