@@ -2,15 +2,22 @@ name: Večernji pregled sutrašnjeg dana
 
 on:
   schedule:
-    # ~20:00 po srednjoeuropskom vremenu ~= 19:00 UTC
-    - cron: '0 19 * * *'
+    # GitHub cron je best-effort: kasni (ponekad i satima) i ne zna za ljetno
+    # vrijeme. Zato se backend zove češće tijekom večeri (UTC 17:50-20:50, što
+    # pokriva i CEST i CET), a SAM backend odlučuje: šalje tek kad je u Zagrebu
+    # >= 20:00 i samo jednom dnevno (?cron=1). Prije 20:00 samo vrati "prerano"
+    # (a usput probudi Render). Ako jedan poziv zakasni ili padne, sljedeći
+    # (10 min kasnije) ga nadoknadi - dan se ne preskače.
+    - cron: '50 17 * * *'
+    - cron: '0,10,20,30,40,50 18-20 * * *'
   workflow_dispatch: {}
 
 jobs:
   posalji:
     runs-on: ubuntu-latest
     steps:
-      - name: Pozovi backend endpoint
+      - name: Pozovi backend (šalje se samo kad je >= 20:00 u Zagrebu, jednom dnevno)
         run: |
-          curl -sf -X GET "https://garmin-health-sync-xlyl.onrender.com/push/vecernji-pregled" \
+          curl -sf -m 150 --retry 3 --retry-delay 15 --retry-all-errors \
+            -X GET "https://garmin-health-sync-xlyl.onrender.com/push/vecernji-pregled?cron=1" \
             -H "x-cron-secret: ${{ secrets.CRON_SECRET }}"

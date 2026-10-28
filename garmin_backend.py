@@ -635,13 +635,29 @@ def push_vrijeme_debug():
 
 # ==================== VEČERNJI PREGLED (push u 20h) ====================
 @app.get("/push/vecernji-pregled")
-def push_vecernji_pregled(x_cron_secret: str | None = Header(default=None)):
-    """Poziva se jednom dnevno u ~20h (GitHub Actions cron) - šalje push sa
-    sutrašnjim eventima iz svih povezanih kalendara i vremenskom prognozom."""
+def push_vecernji_pregled(cron: bool = False, x_cron_secret: str | None = Header(default=None)):
+    """Šalje push sa sutrašnjim eventima iz svih povezanih kalendara i prognozom.
+
+    Bez parametra (?cron=0) šalje odmah, uvijek - za ručno testiranje.
+    S ?cron=1 (GitHub Actions poziva češće tijekom večeri) šalje TEK kad je
+    zagrebački sat >= 20:00 i samo JEDNOM dnevno - tako ne ovisi o tome u koliko
+    sati GitHub stvarno pokrene posao, i ne propušta dan ako jedan poziv zakasni."""
     if CRON_SECRET and x_cron_secret != CRON_SECRET:
         raise HTTPException(status_code=401, detail="Neispravna tajna.")
 
-    sutra = date.today() + timedelta(days=1)
+    zagreb = ZoneInfo("Europe/Zagreb")
+    sada = datetime.now(zagreb)
+    danas_str = sada.date().isoformat()
+    zapis_ref = db_fs.collection("security").document("push-vecernji-pregled")
+
+    if cron:
+        if sada.hour < 20:
+            return {"ok": True, "preskoceno": "prerano", "zagreb": sada.strftime("%H:%M")}
+        zapis = zapis_ref.get()
+        if zapis.exists and zapis.to_dict().get("zadnjiDatum") == danas_str:
+            return {"ok": True, "preskoceno": "vec poslano danas", "zagreb": sada.strftime("%H:%M")}
+
+    sutra = sada.date() + timedelta(days=1)
     sutra_str = sutra.isoformat()
 
     eventi_dok = list(db_fs.collection("kalendar-eventi").where("dan", "==", sutra_str).stream())
@@ -671,4 +687,7 @@ def push_vecernji_pregled(x_cron_secret: str | None = Header(default=None)):
         broj = posalji_push_svima("Sutra", tijelo)
     except RuntimeError as e:
         raise HTTPException(status_code=500, detail=str(e))
-    return {"ok": True, "broj_uredjaja": broj, "broj_eventa": len(eventi), "vrijeme_debug": vrijeme_tekst}
+
+    if cron:
+        zapis_ref.set({"zadnjiDatum": danas_str, "poslanoU": sada.strftime("%H:%M")})
+    return {"ok": True, "broj_uredjaja": broj, "broj_eventa": len(eventi), "vrijeme_debug": vrijeme_tekst, "zagreb": sada.strftime("%H:%M")}
