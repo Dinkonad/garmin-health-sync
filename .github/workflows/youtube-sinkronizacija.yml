@@ -1,0 +1,15 @@
+name: YouTube sinkronizacija
+
+on:
+  schedule:
+    # jednom dnevno ujutro (UTC 03:20 = 04:20/05:20 u Zagrebu) - povuče nove podatke u Firestore
+    - cron: '20 3 * * *'
+  workflow_dispatch: {}
+
+jobs:
+  sync:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Pozovi backend endpoint
+        run: |
+          curl -sf -m 150 --retry 3 --retry-delay 20 --retry-all-errors             -X GET "https://garmin-health-sync-xlyl.onrender.com/youtube/osvjezi-cron"             -H "x-cron-secret: ${{ secrets.CRON_SECRET }}"

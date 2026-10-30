@@ -49,6 +49,7 @@ from webauthn.helpers.structs import (
 )
 
 from garmin_sync import DB_PATH, init_db, login, sync_activities, sync_day
+from youtube_sync import napravi_router as napravi_youtube_router
 
 BASE_DIR = Path(__file__).resolve().parent
 ADMIN_EMAIL = "naddinko@gmail.com"
@@ -98,6 +99,10 @@ def provjeri_admina(authorization: str | None):
         raise HTTPException(status_code=401, detail="Neispravan ili istekao token.")
     if decoded.get("email") != ADMIN_EMAIL:
         raise HTTPException(status_code=403, detail="Nemaš pristup.")
+
+
+# YouTube pregledi (Google OAuth + sinkronizacija u Firestore) - vidi youtube_sync.py
+app.include_router(napravi_youtube_router(db_fs, provjeri_admina, CRON_SECRET))
 
 
 def posalji_dan_u_firestore(conn, dan: str):
