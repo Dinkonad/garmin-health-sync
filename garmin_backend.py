@@ -461,6 +461,21 @@ def push_test(authorization: str | None = Header(default=None)):
 # periodicki povuce i njegovi dogadaji (ukljucujuci ponavljajuce, npr. raspored
 # predavanja) se spreme u Firestore kolekciju "kalendar-eventi".
 
+def obrisi_nestale_evente(naziv, vidjeni_idevi, od_dana, do_dana):
+    """Brise iz Firestorea evente koje je korisnik obrisao u kalendaru: iste kalendar-a,
+    u rasponu koji se sinkronizira, a nisu se pojavili u zadnjem preuzimanju."""
+    brisi = [
+        d.reference for d in db_fs.collection("kalendar-eventi").where("kalendar", "==", naziv).stream()
+        if d.id not in vidjeni_idevi and od_dana <= (d.to_dict().get("dan") or "") <= do_dana
+    ]
+    for i in range(0, len(brisi), 400):
+        batch = db_fs.batch()
+        for ref in brisi[i:i + 400]:
+            batch.delete(ref)
+        batch.commit()
+    return len(brisi)
+
+
 def dohvati_i_spremi_kalendare():
     if not ICLOUD_KALENDARI:
         return {"ok": False, "razlog": "ICLOUD_KALENDARI nije postavljen."}
@@ -482,6 +497,7 @@ def dohvati_i_spremi_kalendare():
 
         batch = db_fs.batch()
         u_batchu = 0
+        vidjeni_idevi = set()
         for dogadjaj in dogadjaji:
             naslov = str(dogadjaj.get("SUMMARY", "") or "Bez naziva")
             opis = str(dogadjaj.get("DESCRIPTION", "") or "")
@@ -519,6 +535,7 @@ def dohvati_i_spremi_kalendare():
 
             for dan_str in dani_pokriveni:
                 doc_id = hashlib.sha1(f"{sirovi_uid_base}|{dan_str}".encode()).hexdigest()[:24]
+                vidjeni_idevi.add(doc_id)
                 ref = db_fs.collection("kalendar-eventi").document(doc_id)
                 batch.set(ref, {
                     "kalendar": naziv,
@@ -539,6 +556,16 @@ def dohvati_i_spremi_kalendare():
                     batch = db_fs.batch()
                     u_batchu = 0
         batch.commit()
+
+        # preuzimanje je uspjelo pa je popis potpun - sve sto je u bazi a nije u kalendaru je obrisano
+        try:
+            obrisano = obrisi_nestale_evente(
+                naziv, vidjeni_idevi, pocetak_raspona.date().isoformat(), kraj_raspona.date().isoformat()
+            )
+            if obrisano:
+                print(f"Kalendar '{naziv}': obrisano {obrisano} nestalih eventa.")
+        except Exception as e:
+            print(f"Greška pri brisanju nestalih eventa kalendara '{naziv}': {e}")
 
     db_fs.collection("kalendar-meta").document("zadnja-sinkronizacija").set({
         "vrijeme": firestore.SERVER_TIMESTAMP,
