@@ -698,9 +698,33 @@ def push_vecernji_pregled(cron: bool = False, x_cron_secret: str | None = Header
         key=lambda e: e.get("pocetak", "")
     )
 
+    # radni dan iz Biznis baze (+ teren ako je oznacen) - to je izvor istine za posao
+    raspored = sorted(
+        [d.to_dict() for d in db_fs.collection("raspored-aktivnosti").where("datum", "==", sutra_str).stream()],
+        key=lambda r: r.get("pocetnoVrijeme", "")
+    )
+    stavke_rasporeda = []
+    for r in raspored:
+        redak = f"💼 Rad {r.get('pocetnoVrijeme', '')}-{r.get('zavrsnoVrijeme', '')}"
+        if r.get("opis"):
+            redak += f" ({r['opis']})"
+        stavke_rasporeda.append(redak)
+        if r.get("terenSat"):
+            teren = f"📍 Teren {r['terenSat']}"
+            if r.get("terenNapomena"):
+                teren += f" - {r['terenNapomena']}"
+            stavke_rasporeda.append(teren)
+
+    # dani izvezeni iz Biznis baze u iPhone kalendar "Biznis baza" ne smiju se ispisati dvaput
+    pocetci_rasporeda = {r.get("pocetnoVrijeme") for r in raspored}
+    eventi = [
+        e for e in eventi
+        if not (e.get("kalendar") == "Biznis baza" and not e.get("cijeliDan") and e.get("pocetak", "")[11:16] in pocetci_rasporeda)
+    ]
+
     vrijeme_tekst = dohvati_vrijeme_sutra()
 
-    if eventi:
+    if stavke_rasporeda or eventi:
         stavke = []
         for e in eventi:
             if e.get("cijeliDan"):
@@ -708,7 +732,7 @@ def push_vecernji_pregled(cron: bool = False, x_cron_secret: str | None = Header
             else:
                 vrijeme_poc = e["pocetak"][11:16] if len(e["pocetak"]) > 16 else ""
                 stavke.append(f"{vrijeme_poc} {e['naslov']}".strip())
-        tijelo = "\n".join(f"📅 {s}" for s in stavke)
+        tijelo = "\n".join(stavke_rasporeda + [f"📅 {s}" for s in stavke])
     else:
         tijelo = "Nemaš ništa zakazano. Uživaj u sutrašnjem danu! 😊"
 
@@ -722,4 +746,4 @@ def push_vecernji_pregled(cron: bool = False, x_cron_secret: str | None = Header
 
     if cron:
         zapis_ref.set({"zadnjiDatum": danas_str, "poslanoU": sada.strftime("%H:%M")})
-    return {"ok": True, "broj_uredjaja": broj, "broj_eventa": len(eventi), "vrijeme_debug": vrijeme_tekst, "zagreb": sada.strftime("%H:%M")}
+    return {"ok": True, "broj_uredjaja": broj, "broj_eventa": len(eventi), "broj_radnih_dana": len(raspored), "vrijeme_debug": vrijeme_tekst, "zagreb": sada.strftime("%H:%M")}
