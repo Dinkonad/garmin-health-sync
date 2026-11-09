@@ -97,7 +97,9 @@ def provjeri_admina(authorization: str | None):
         decoded = fb_auth.verify_id_token(token)
     except Exception:
         raise HTTPException(status_code=401, detail="Neispravan ili istekao token.")
-    if decoded.get("email") != ADMIN_EMAIL:
+    # prijava lozinkom/Googleom nosi email; Face ID prijava nosi oznaku "vlasnik" koju backend upisuje
+    # u prilagođeni token SAMO nakon uspješne provjere uređaja (običan korisnik je ne može dobiti)
+    if decoded.get("email") != ADMIN_EMAIL and decoded.get("vlasnik") is not True:
         raise HTTPException(status_code=403, detail="Nemaš pristup.")
 
 
@@ -358,7 +360,8 @@ async def faceid_login_verify(request: Request):
     db_fs.collection("security").document("webauthn-credentials").set({"credentials": azurirani})
 
     user = fb_auth.get_user_by_email(ADMIN_EMAIL)
-    token = fb_auth.create_custom_token(user.uid)
+    # "vlasnik": Firestore pravila i provjeri_admina po tome prepoznaju Face ID prijavu
+    token = fb_auth.create_custom_token(user.uid, {"vlasnik": True})
     return {"token": token.decode() if isinstance(token, bytes) else token}
 
 
