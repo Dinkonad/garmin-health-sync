@@ -12,4 +12,44 @@ jobs:
     steps:
       - name: Pozovi backend endpoint
         run: |
-          curl -sf -m 150 --retry 3 --retry-delay 20 --retry-all-errors             -X GET "https://garmin-health-sync-xlyl.onrender.com/youtube/osvjezi-cron"             -H "x-cron-secret: ${{ secrets.CRON_SECRET }}"
+          # Ispisuje stvarni odgovor backenda (prije je curl -f skrivao razlog neuspjeha).
+          # Ponavlja samo kad ima smisla: Render se možda tek budi (5xx / mrežna greška).
+          # 401 (kriva tajna) je greška; istekla veza je upozorenje. Ni jedno se ne ponavlja.
+          for pokusaj in 1 2 3; do
+            status=$(curl -s -m 150 -o odgovor.txt -w "%{http_code}" \
+              -X GET "https://garmin-health-sync-xlyl.onrender.com/youtube/osvjezi-cron" \
+              -H "x-cron-secret: ${{ secrets.CRON_SECRET }}" || echo "000")
+            echo "Pokušaj $pokusaj: HTTP $status"
+            cat odgovor.txt 2>/dev/null || true
+            echo
+
+            if [ "$status" = "200" ]; then
+              # istekla veza je očekivana (Google "Testing" način): backend je već poslao push na mobitel,
+              # pa je ovo samo upozorenje - run ostaje zelen i ne stiže mail o neuspjehu
+              if grep -q '"istekla":true' odgovor.txt; then
+                echo "::warning::YouTube veza je istekla - poveži ponovno u appu (Društvene mreže > YouTube). Push je poslan."
+                exit 0
+              fi
+              # backend vraća {"ok": false, ...} s HTTP 200 kad YouTube nije povezan
+              if grep -q '"ok":false' odgovor.txt; then
+                echo "::error::Backend je odgovorio, ali sinkronizacija nije uspjela (vidi odgovor iznad)."
+                exit 1
+              fi
+              exit 0
+            fi
+
+            if [ "$status" = "401" ]; then
+              echo "::error::401 - CRON_SECRET u GitHub Secrets se ne podudara s onim na Renderu."
+              exit 1
+            fi
+
+            if [ "$status" = "409" ]; then
+              echo "::warning::409 - YouTube nije povezan ili je veza istekla. Otvori app > Društvene mreže > YouTube i poveži ponovno."
+              exit 0
+            fi
+
+            sleep 20
+          done
+
+          echo "::error::Backend nije uspješno odgovorio nakon 3 pokušaja (zadnji HTTP $status)."
+          exit 1

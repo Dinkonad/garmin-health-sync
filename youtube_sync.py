@@ -18,6 +18,8 @@ Env varijable (Render):
   GOOGLE_CLIENT_ID, GOOGLE_CLIENT_SECRET  - iz Google Cloud -> Credentials -> OAuth client
   YOUTUBE_REDIRECT_URI                    - (opcionalno) default <render url>/youtube/callback;
                                             mora biti upisan u "Authorized redirect URIs"
+  YOUTUBE_VEZA_VRIJEDI_DANA               - (opcionalno) koliko dana vrijedi veza, default 7 (Google "Testing"
+                                            način). Postavi 0 ako je OAuth aplikacija objavljena (token ne istječe).
   YOUTUBE_POVRATNI_ORIGINI                - (opcionalno) zarezom odvojeni origini na koje se
                                             korisnik smije vratiti nakon prijave
 """
@@ -59,6 +61,8 @@ ANALITIKA_API = "https://youtubeanalytics.googleapis.com/v2/reports"
 ZAGREB = ZoneInfo("Europe/Zagreb")
 MAX_STRANICA_VIDEA = 4          # 4 x 50 = zadnjih 200 videa
 POCETNA_POVIJEST_DANA = 730     # prvi sync povuče do 2 godine unatrag
+VEZA_VRIJEDI_DANA = int(os.getenv("YOUTUBE_VEZA_VRIJEDI_DANA", "7"))   # Google u "Testing" načinu ukida token nakon 7 dana; 0 = ne istječe
+UPOZORI_DANA_PRIJE = 2          # push upozorenje otprilike toliko dana prije isteka veze
 OBICNI_SYNC_DANA = 10           # analitika kasni i naknadno se ispravlja, pa uvijek povuci zadnjih 10 dana
 
 
@@ -93,7 +97,7 @@ def _greska_iz_odgovora(r: requests.Response) -> str:
     return f"HTTP {r.status_code}"
 
 
-def napravi_router(db_fs, provjeri_admina, cron_secret: str) -> APIRouter:
+def napravi_router(db_fs, provjeri_admina, cron_secret: str, posalji_push=None) -> APIRouter:
     router = APIRouter(prefix="/youtube")
 
     tajne = lambda: db_fs.collection("youtube-tajne")  # noqa: E731
@@ -101,6 +105,42 @@ def napravi_router(db_fs, provjeri_admina, cron_secret: str) -> APIRouter:
 
     def postavi_status(**polja):
         status_ref().set(polja, merge=True)
+
+    def javi_push(naslov: str, tijelo: str) -> bool:
+        """Push na mobitel; greška pri slanju nikad ne smije srušiti sinkronizaciju."""
+        if not posalji_push:
+            return False
+        try:
+            posalji_push(naslov, tijelo)
+            return True
+        except Exception as e:  # noqa: BLE001
+            print(f"YouTube push nije poslan: {e}")
+            return False
+
+    def javi_istek_veze():
+        """Jednom po istjecanju: push 'veza je istekla' (flag se briše pri novom povezivanju)."""
+        status = status_ref().get().to_dict() or {}
+        postavi_status(povezano=False, istekla=True)
+        if not status.get("obavijestIstek"):
+            if javi_push("YouTube veza je istekla", "Otvori Društvene mreže > YouTube i klikni 'Poveži ponovno'. Podaci se nadoknade."):
+                postavi_status(obavijestIstek=True)
+
+    def provjeri_blizi_istek():
+        """Jednom prije isteka: push 'veza ističe za N dana'."""
+        status = status_ref().get().to_dict() or {}
+        istjece_txt = status.get("istjeceU")
+        if not istjece_txt or status.get("obavijestUskoro"):
+            return
+        try:
+            istjece = datetime.fromisoformat(istjece_txt)
+        except ValueError:
+            return
+        preostalo = istjece - datetime.now(ZAGREB)
+        if timedelta(0) < preostalo <= timedelta(days=UPOZORI_DANA_PRIJE):
+            dana = max(1, round(preostalo.total_seconds() / 86400))
+            tekst = "sutra" if dana == 1 else f"za {dana} dana"
+            if javi_push(f"YouTube veza ističe {tekst}", "Otvori Društvene mreže > YouTube i klikni 'Poveži ponovno' (traje par sekundi)."):
+                postavi_status(obavijestUskoro=True)
 
     # ==================== POVEZIVANJE ====================
     @router.get("/povezi-url")
@@ -174,10 +214,16 @@ def napravi_router(db_fs, provjeri_admina, cron_secret: str) -> APIRouter:
             "refresh": _fernet().encrypt(refresh.encode()).decode(),
             "povezanoU": datetime.now(ZAGREB).isoformat(),
         })
+        sada_veza = datetime.now(ZAGREB)
         postavi_status(
             povezano=True,
             analitikaOdobrena=SCOPE_ANALITIKA in odobreno,
             greska="",
+            povezanoU=sada_veza.isoformat(),
+            istjeceU=(sada_veza + timedelta(days=VEZA_VRIJEDI_DANA)).isoformat() if VEZA_VRIJEDI_DANA > 0 else None,
+            istekla=False,
+            obavijestIstek=False,
+            obavijestUskoro=False,
         )
         return vrati(True)
 
@@ -215,7 +261,8 @@ def napravi_router(db_fs, provjeri_admina, cron_secret: str) -> APIRouter:
         if r.status_code != 200:
             poruka = _greska_iz_odgovora(r)
             if "invalid_grant" in poruka:
-                postavi_status(povezano=False, greska="Veza s YouTubeom je istekla ili opozvana - poveži ponovno.")
+                postavi_status(greska="Veza s YouTubeom je istekla ili opozvana - poveži ponovno.")
+                javi_istek_veze()
                 raise HTTPException(status_code=409, detail="Veza je istekla ili opozvana - poveži ponovno.")
             raise HTTPException(status_code=502, detail=f"Obnova tokena nije uspjela: {poruka}")
         return r.json()["access_token"]
@@ -356,6 +403,13 @@ def napravi_router(db_fs, provjeri_admina, cron_secret: str) -> APIRouter:
             raise HTTPException(status_code=401, detail="Neispravna tajna.")
         if not tajne().document("token").get().exists:
             return {"ok": False, "razlog": "YouTube nije povezan."}
-        return sinkroniziraj(False)
+        provjeri_blizi_istek()
+        try:
+            return sinkroniziraj(False)
+        except HTTPException as e:
+            if e.status_code == 409:
+                # očekivano: veza je istekla (push je već poslan) - ne tretiramo kao kvar servera
+                return {"ok": False, "istekla": True, "razlog": e.detail}
+            raise
 
     return router

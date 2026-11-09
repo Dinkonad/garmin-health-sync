@@ -102,7 +102,7 @@ def provjeri_admina(authorization: str | None):
 
 
 # YouTube pregledi (Google OAuth + sinkronizacija u Firestore) - vidi youtube_sync.py
-app.include_router(napravi_youtube_router(db_fs, provjeri_admina, CRON_SECRET))
+app.include_router(napravi_youtube_router(db_fs, provjeri_admina, CRON_SECRET, posalji_push=lambda n, t: posalji_push_svima(n, t)))
 
 
 def posalji_dan_u_firestore(conn, dan: str):
