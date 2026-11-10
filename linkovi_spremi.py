@@ -481,6 +481,29 @@ def spremi_link(db_fs, tekst, naslov=None, biljeska=None, oznake=None, izvor="ap
 
 # ---------------------------------------------------------------- ruter
 
+def _kao_tekst(vrijednost) -> str:
+    if vrijednost is None:
+        return ""
+    if isinstance(vrijednost, str):
+        return vrijednost
+    try:
+        return json.dumps(vrijednost, ensure_ascii=False)
+    except Exception:  # noqa: BLE001
+        return str(vrijednost)
+
+
+def pronadi_tekst_s_linkom(tijelo: dict) -> str:
+    """Tekst koji sadrži link. Prvo poznata polja, a ako ih nema, cijelo tijelo (osim ključa)."""
+    for polje in ("url", "tekst", "link", "text", "input"):
+        t = _kao_tekst(tijelo.get(polje))
+        if izvuci_url(t):
+            return t
+    ostalo = _kao_tekst({k: v for k, v in tijelo.items() if k != "kljuc"})
+    if izvuci_url(ostalo):
+        return ostalo
+    return _kao_tekst(tijelo.get("url")) or ostalo
+
+
 def napravi_router(db_fs, provjeri_admina) -> APIRouter:
     router = APIRouter(prefix="/linkovi")
     tajna_ref = lambda: db_fs.collection("linkovi-tajne").document("precac")  # noqa: E731
@@ -495,6 +518,25 @@ def napravi_router(db_fs, provjeri_admina) -> APIRouter:
         kljuc = secrets.token_urlsafe(24)
         tajna_ref().set({"kljuc": kljuc, "napravljen": int(time.time())})
         return kljuc
+
+    def zabiljezi(ishod: str, poruka: str, izvor: str, primljeno: str = ""):
+        """Dnevnik pokušaja (kolekcija linkovi-dnevnik): u appu se vidi je li zahtjev stigao i što je pošlo po zlu.
+        Ključ se nikad ne sprema. Greška pri bilježenju nikad ne smije srušiti spremanje."""
+        try:
+            from firebase_admin import firestore as fb_firestore
+
+            kol = db_fs.collection("linkovi-dnevnik")
+            kol.document().set({
+                "vrijeme": fb_firestore.SERVER_TIMESTAMP,
+                "ishod": ishod,
+                "poruka": skrati(poruka, 300),
+                "izvor": izvor,
+                "primljeno": skrati(primljeno, 200),
+            })
+            for stari in kol.order_by("vrijeme", direction="DESCENDING").offset(30).limit(20).stream():
+                stari.reference.delete()
+        except Exception as e:  # noqa: BLE001
+            print(f"Linkovi: dnevnik nije zapisan: {e}")
 
     def kljuc_vrijedi(predan: str | None) -> bool:
         pravi = dohvati_kljuc(napravi=False)
@@ -531,14 +573,33 @@ def napravi_router(db_fs, provjeri_admina) -> APIRouter:
                 raise HTTPException(status_code=429, detail="Previše pogrešnih pokušaja. Pokušaj za 10 minuta.")
             if not await run_in_threadpool(kljuc_vrijedi, predan):
                 _neuspjeli_kljucevi.append(sada)
+                poruka_kljuca = (
+                    "Neispravan ključ prečaca. Kopiraj ključ ponovno iz appa u polje kljuc u prečacu."
+                    if predan else
+                    "Prečac nije poslao ključ (polje kljuc je prazno ili ga nema)."
+                )
+                await run_in_threadpool(zabiljezi, "greska", poruka_kljuca, "precac", _kao_tekst(tijelo.get("url")))
                 await asyncio.sleep(0.5)
                 raise HTTPException(status_code=401, detail="Neispravan ključ prečaca.")
             izvor = "precac"
 
-        tekst_s_linkom = tijelo.get("url") or tijelo.get("tekst") or tijelo.get("link") or ""
-        return await run_in_threadpool(
-            spremi_link, db_fs, tekst_s_linkom, tijelo.get("naziv"), tijelo.get("biljeska"), tijelo.get("oznake"), izvor
+        tekst_s_linkom = pronadi_tekst_s_linkom(tijelo)
+        try:
+            odgovor = await run_in_threadpool(
+                spremi_link, db_fs, tekst_s_linkom, tijelo.get("naziv"), tijelo.get("biljeska"), tijelo.get("oznake"), izvor
+            )
+        except HTTPException as e:
+            await run_in_threadpool(zabiljezi, "greska", str(e.detail), izvor, tekst_s_linkom)
+            raise
+        except Exception as e:  # noqa: BLE001
+            opis = f"{type(e).__name__}: {e}"
+            print(f"Linkovi: neočekivana greška: {opis}")
+            await run_in_threadpool(zabiljezi, "greska", f"Greška na serveru: {opis}", izvor, tekst_s_linkom)
+            raise HTTPException(status_code=500, detail=f"Greška na serveru: {opis}")
+        await run_in_threadpool(
+            zabiljezi, "duplikat" if odgovor.get("vec_postoji") else "ok", odgovor.get("poruka", ""), izvor, tekst_s_linkom
         )
+        return odgovor
 
     @router.get("/precac")
     def precac_kljuc(authorization: str | None = Header(default=None)):
