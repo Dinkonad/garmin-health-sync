@@ -50,6 +50,7 @@ from webauthn.helpers.structs import (
 
 from garmin_sync import DB_PATH, init_db, login, sync_activities, sync_day
 from youtube_sync import napravi_router as napravi_youtube_router
+from linkovi_spremi import napravi_router as napravi_linkovi_router
 from garmin_rute import napravi_zapis, je_ruta_tip, MIN_UDALJENOST_M
 
 BASE_DIR = Path(__file__).resolve().parent
@@ -106,6 +107,9 @@ def provjeri_admina(authorization: str | None):
 
 # YouTube pregledi (Google OAuth + sinkronizacija u Firestore) - vidi youtube_sync.py
 app.include_router(napravi_youtube_router(db_fs, provjeri_admina, CRON_SECRET, posalji_push=lambda n, t: posalji_push_svima(n, t)))
+
+# Linkovi: spremanje videa s Instagrama/Facebooka/TikToka... jednim dodirom (iOS Prečac) - vidi linkovi_spremi.py
+app.include_router(napravi_linkovi_router(db_fs, provjeri_admina))
 
 
 def posalji_dan_u_firestore(conn, dan: str):
