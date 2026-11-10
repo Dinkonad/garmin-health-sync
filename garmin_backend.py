@@ -50,6 +50,7 @@ from webauthn.helpers.structs import (
 
 from garmin_sync import DB_PATH, init_db, login, sync_activities, sync_day
 from youtube_sync import napravi_router as napravi_youtube_router
+from garmin_rute import napravi_zapis, je_ruta_tip, MIN_UDALJENOST_M
 
 BASE_DIR = Path(__file__).resolve().parent
 ADMIN_EMAIL = "naddinko@gmail.com"
@@ -140,6 +141,74 @@ def posalji_aktivnosti_u_firestore(conn, start: date, end: date):
     return broj
 
 
+# ==================== GPS RUTE (Zdravlje > Rute) ====================
+# Za svaku aktivnost hodanja/trčanja povuče se GPS ruta s Garmin Connecta, pojednostavi i spremi u
+# Firestore "zdravlje-rute/{activity_id}" (vidi garmin_rute.py). Rute se spremaju CIJELE; ako ikad poželiš
+# odsjeći početak i kraj (privatnost pri dijeljenju ekrana), postavi ZDRAVLJE_RUTE_ODSIJECI_METARA=200.
+# Aktivnosti bez GPS-a dobiju bezRute=True da se ne traže iznova.
+RUTE_ODSIJECI_METARA = int(os.getenv("ZDRAVLJE_RUTE_ODSIJECI_METARA", "0"))
+
+
+def povuci_rute(api, max_novih: int | None = None, od: str | None = None, do: str | None = None) -> dict:
+    """Povuče rute za aktivnosti u Firestoreu koje ih još nemaju. Vraća {povuceno, preostalo, greske}."""
+    upit = db_fs.collection("zdravlje-aktivnosti")
+    if od:
+        upit = upit.where("start_time", ">=", od)
+    if do:
+        upit = upit.where("start_time", "<", do)
+
+    imaju = {d.id for d in db_fs.collection("zdravlje-rute").select([]).stream()}
+    kandidati = []
+    for d in upit.stream():
+        a = d.to_dict() or {}
+        if d.id in imaju or not je_ruta_tip(a.get("type")) or (a.get("distance_m") or 0) < MIN_UDALJENOST_M:
+            continue
+        kandidati.append((a.get("start_time") or "", d.id, a))
+    kandidati.sort(reverse=True)  # najnovije prve
+
+    povuceno = greske = zaredom = 0
+    for _, activity_id, a in kandidati:
+        if max_novih is not None and povuceno >= max_novih:
+            break
+        try:
+            detalji = api.get_activity_details(int(activity_id), maxchart=1, maxpoly=1500)
+            zapis = napravi_zapis(detalji, a, RUTE_ODSIJECI_METARA)
+            zapis["azurirano"] = firestore.SERVER_TIMESTAMP
+            db_fs.collection("zdravlje-rute").document(activity_id).set(zapis)
+            povuceno += 1
+            zaredom = 0
+        except Exception as e:  # noqa: BLE001
+            greske += 1
+            zaredom += 1
+            print(f"Ruta {activity_id} nije povučena: {e}")
+            if zaredom >= 3:  # vjerojatno ograničenje Garmina - prekini, nastavit će se kasnije
+                break
+        time.sleep(1)
+
+    return {"povuceno": povuceno, "preostalo": max(0, len(kandidati) - povuceno), "greske": greske}
+
+
+def obavi_povlacenje_ruta():
+    meta_ref = db_fs.collection("zdravlje-meta").document("rute")
+    meta_ref.set({"uTijeku": True, "pocetak": firestore.SERVER_TIMESTAMP, "povuceno": 0, "greska": firestore.DELETE_FIELD}, merge=True)
+    ukupno = 0
+    preostalo = None
+    try:
+        api = login()
+        while True:
+            rez = povuci_rute(api, max_novih=25)
+            ukupno += rez["povuceno"]
+            preostalo = rez["preostalo"]
+            meta_ref.set({"povuceno": ukupno, "preostalo": preostalo}, merge=True)
+            if rez["povuceno"] == 0 or preostalo == 0:
+                break
+        meta_ref.set({"uTijeku": False, "vrijeme": firestore.SERVER_TIMESTAMP, "povuceno": ukupno, "preostalo": preostalo}, merge=True)
+        if preostalo:
+            meta_ref.set({"greska": f"Preostalo je još {preostalo} ruta (Garmin je privremeno odbio zahtjeve) - pokušaj ponovno za nekoliko minuta."}, merge=True)
+    except Exception as e:  # noqa: BLE001
+        meta_ref.set({"uTijeku": False, "greska": str(e), "vrijeme": firestore.SERVER_TIMESTAMP, "povuceno": ukupno}, merge=True)
+
+
 def obavi_sync(start: date, end: date):
     meta_ref = db_fs.collection("zdravlje-meta").document("zadnji-sync")
     meta_ref.set({
@@ -173,6 +242,10 @@ def obavi_sync(start: date, end: date):
             if (kraj_komada - pocetak_komada).days >= 29 or day > end:
                 sync_activities(api, conn, pocetak_komada, kraj_komada)
                 broj_aktivnosti += posalji_aktivnosti_u_firestore(conn, pocetak_komada, kraj_komada)
+                try:
+                    povuci_rute(api, max_novih=40, od=pocetak_komada.isoformat(), do=(kraj_komada + timedelta(days=1)).isoformat())
+                except Exception as e:  # noqa: BLE001
+                    print(f"Povlačenje ruta nije uspjelo (sync nastavlja): {e}")
                 pocetak_komada = day
                 meta_ref.set({"dana": broj, "aktivnosti": broj_aktivnosti}, merge=True)
 
@@ -215,6 +288,25 @@ def sync(background_tasks: BackgroundTasks, days: int = 3, since: str | None = N
     background_tasks.add_task(obavi_sync, start, end)
 
     return {"ok": True, "pokrenuto": True, "od": start.isoformat(), "do": end.isoformat()}
+
+
+@app.post("/zdravlje/rute/povuci")
+def zdravlje_rute_povuci(background_tasks: BackgroundTasks, authorization: str | None = Header(default=None)):
+    """Povuče GPS rute za sve aktivnosti koje ih još nemaju (jednom, za staru povijest)."""
+    provjeri_admina(authorization)
+    meta = db_fs.collection("zdravlje-meta").document("rute").get().to_dict() or {}
+    if meta.get("uTijeku"):
+        raise HTTPException(status_code=409, detail="Povlačenje ruta je već u tijeku.")
+    background_tasks.add_task(obavi_povlacenje_ruta)
+    return {"ok": True, "pokrenuto": True}
+
+
+@app.post("/zdravlje/rute/reset")
+def zdravlje_rute_reset(authorization: str | None = Header(default=None)):
+    """Izlaz iz nužde ako je status ostao na 'u tijeku' (npr. Render je ugasio proces usred posla)."""
+    provjeri_admina(authorization)
+    db_fs.collection("zdravlje-meta").document("rute").set({"uTijeku": False, "greska": "Ručno resetirano."}, merge=True)
+    return {"ok": True}
 
 
 @app.post("/sync/reset")
