@@ -241,6 +241,8 @@ def slozi_zip(pohrana: Pohrana, gid: str, fotke: list[dict], kljuc_zip: str, nap
     """Čita originale iz R2 jedan po jedan i piše ZIP (bez kompresije) izravno u R2 u dijelovima."""
     pisac = PisacMultipart(pohrana, kljuc_zip)
     koristena = set()
+    ukupno_bajtova = sum(int(f.get("s") or 0) for f in fotke)   # napredak po bajtovima, ne po broju fotki
+    obradeno = 0
     try:
         with zipfile.ZipFile(pisac, "w", zipfile.ZIP_STORED, allowZip64=True) as zf:
             for i, f in enumerate(fotke, start=1):
@@ -257,7 +259,10 @@ def slozi_zip(pohrana: Pohrana, gid: str, fotke: list[dict], kljuc_zip: str, nap
                 with zf.open(info, "w", force_zip64=True) as izlaz:
                     for dio in pohrana.dijelovi(f"g/{gid}/o/{f['i']}.{f['e']}"):
                         izlaz.write(dio)
-                if napredak:
+                        obradeno += len(dio)
+                        if napredak and ukupno_bajtova:
+                            napredak(min(obradeno, ukupno_bajtova), ukupno_bajtova)
+                if napredak and not ukupno_bajtova:
                     napredak(i, len(fotke))
         pisac.zavrsi()
     except Exception:
