@@ -156,6 +156,30 @@ class Pohrana:
             if dio:
                 self.s3.delete_objects(Bucket=self.bucket, Delete={"Objects": dio, "Quiet": True})
 
+    def zauzece(self, najvise_stranica: int = 2000) -> dict:
+        """Zbroj veličina svih objekata u bucketu (ono što R2 naplaćuje), ukupno i po glavnim mapama."""
+        ukupno = objekata = 0
+        po_mapama: dict[str, int] = defaultdict(int)
+        token = None
+        potpuno = True
+        for stranica in range(najvise_stranica):
+            argumenti = {"Bucket": self.bucket, "Prefix": ""}
+            if token:
+                argumenti["ContinuationToken"] = token
+            o = self.s3.list_objects_v2(**argumenti)
+            for x in o.get("Contents", []):
+                velicina = int(x.get("Size") or 0)
+                ukupno += velicina
+                objekata += 1
+                kljuc = x["Key"]
+                po_mapama[kljuc.split("/", 1)[0] if "/" in kljuc else "ostalo"] += velicina
+            if not o.get("IsTruncated"):
+                break
+            token = o.get("NextContinuationToken")
+        else:
+            potpuno = False   # preveliki bucket: zbroj je donja granica
+        return {"bajtova": ukupno, "objekata": objekata, "poMapama": dict(po_mapama), "potpuno": potpuno}
+
     def obrisi_prefiks(self, prefiks: str):
         token = None
         while True:
@@ -438,6 +462,21 @@ def napravi_router(db_fs, provjeri_admina, pohrana_tvornica=napravi_pohranu) -> 
 
     def novi_token() -> str:
         return secrets.token_urlsafe(16)          # 128 bita
+
+    @router.get("/galerije/pohrana")
+    def zauzece_pohrane(osvjezi: bool = False, authorization: str | None = Header(default=None)):
+        """Koliko je R2 bucket pun (zbroj stvarnih veličina). Rezultat se 10 min pamti da ne troši zahtjeve."""
+        admin(authorization)
+        sada = sada_ts()
+        spremljeno = stanje.get("zauzece")
+        if spremljeno:
+            starost = sada - spremljeno["izracunato"]
+            if starost < (20 if osvjezi else 600):
+                return spremljeno
+        rez = pohrana().zauzece()
+        rez["izracunato"] = sada
+        stanje["zauzece"] = rez
+        return rez
 
     @router.post("/galerije")
     def napravi_galeriju(tijelo: dict, authorization: str | None = Header(default=None)):
