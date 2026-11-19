@@ -47,6 +47,7 @@ TIP_SADRZAJA = {
 }
 MAX_ORIGINAL_BAJTOVA = 500 * 1024 * 1024
 MAX_ZIP_BAJTOVA = 10 * 1024 * 1024 * 1024
+MALI_ZIP_BAJTOVA = 300 * 1024 * 1024   # do ove veličine ZIP ne čeka iza velikih
 SLIKE_VRIJEME = 6 * 3600          # važenje linka slike (s)
 PREUZIMANJE_VRIJEME = 300         # važenje linka preuzimanja (s)
 PRISTUP_VRIJEME = 12 * 3600       # važenje dozvole nakon unosa PIN-a (s)
@@ -280,7 +281,8 @@ def napravi_router(db_fs, provjeri_admina, pohrana_tvornica=napravi_pohranu) -> 
     predmemorija_galerija = {}                    # token -> (vrijeme, gid, podaci)
     predmemorija_manifesta = {}                   # gid -> (vrijeme, manifest)
     poslovi_zip = {}
-    zip_semafor = threading.Semaphore(1)
+    zip_semafor = threading.Semaphore(1)          # veliki odabiri: jedan po jedan
+    zip_semafor_mali = threading.Semaphore(2)     # mali odabiri ne čekaju iza velikog ZIP-a
     viđeni_posjeti = {}                           # (gid, posjetitelj) -> zadnji pregled
 
     # ---------- ovisnosti
@@ -667,7 +669,7 @@ def napravi_router(db_fs, provjeri_admina, pohrana_tvornica=napravi_pohranu) -> 
 
     @router.post("/javno/g/{token}/zip")
     def javno_zip(token: str, tijelo: dict, request: Request, x_pristup: str | None = Header(default=None)):
-        ogranicivac.provjeri(f"zip:{klijentski_ip(request)}", 120, 3600)   # provjere statusa su česte
+        ogranicivac.provjeri(f"zip:{klijentski_ip(request)}", 2400, 3600)   # provjere statusa su česte (svake 3 s)
         gid, g = galerija_po_tokenu(token)
         provjeri_pristup(gid, g, x_pristup)
         provjeri_preuzimanje(g)
@@ -701,8 +703,11 @@ def napravi_router(db_fs, provjeri_admina, pohrana_tvornica=napravi_pohranu) -> 
             for k in [k for k, v in poslovi_zip.items() if v["status"] != "gradi"][:50]:
                 poslovi_zip.pop(k, None)
 
+        mali_odabir = sum(f.get("s", 0) for f in odabrane) <= MALI_ZIP_BAJTOVA
+        semafor = zip_semafor_mali if mali_odabir else zip_semafor
+
         def posao_fn():
-            with zip_semafor:
+            with semafor:
                 try:
                     slozi_zip(p, gid, odabrane, kljuc, napredak=lambda i, n: novi.update(napredak=i / n))
                     novi.update(status="spremno", napredak=1.0)
