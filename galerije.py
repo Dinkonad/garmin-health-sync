@@ -656,7 +656,7 @@ def napravi_router(db_fs, provjeri_admina, pohrana_tvornica=napravi_pohranu) -> 
 
     @router.post("/javno/g/{token}/preuzmi")
     def javno_preuzmi(token: str, tijelo: dict, request: Request, x_pristup: str | None = Header(default=None)):
-        ogranicivac.provjeri(f"preuzmi:{klijentski_ip(request)}", 120, 600)
+        ogranicivac.provjeri(f"preuzmi:{klijentski_ip(request)}", 1000, 600)   # "Preuzmi sve" traži link za svaku fotku
         gid, g = galerija_po_tokenu(token)
         provjeri_pristup(gid, g, x_pristup)
         provjeri_preuzimanje(g)
