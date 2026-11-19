@@ -566,6 +566,8 @@ def napravi_router(db_fs, provjeri_admina) -> APIRouter:
             izvor = "app"
         else:
             predan = x_link_token or tijelo.get("kljuc")
+            # razmak/novi red/navodnici uz zalijepljeni ključ (česti pri kopiranju) ne smiju ga pokvariti
+            predan = _kao_tekst(predan).strip().strip("\"'").strip() or None
             sada = time.time()
             while _neuspjeli_kljucevi and sada - _neuspjeli_kljucevi[0] > 600:
                 _neuspjeli_kljucevi.popleft()
@@ -573,11 +575,14 @@ def napravi_router(db_fs, provjeri_admina) -> APIRouter:
                 raise HTTPException(status_code=429, detail="Previše pogrešnih pokušaja. Pokušaj za 10 minuta.")
             if not await run_in_threadpool(kljuc_vrijedi, predan):
                 _neuspjeli_kljucevi.append(sada)
-                poruka_kljuca = (
-                    "Neispravan ključ prečaca. Kopiraj ključ ponovno iz appa u polje kljuc u prečacu."
-                    if predan else
-                    "Prečac nije poslao ključ (polje kljuc je prazno ili ga nema)."
-                )
+                if predan:
+                    ocekivana = len(await run_in_threadpool(dohvati_kljuc, False) or "")
+                    poruka_kljuca = (
+                        f"Neispravan ključ prečaca (primljeno {len(predan)} znakova, treba {ocekivana}). "
+                        "Kopiraj ključ ponovno iz appa u polje kljuc u prečacu."
+                    )
+                else:
+                    poruka_kljuca = "Prečac nije poslao ključ (polje kljuc je prazno ili ga nema)."
                 await run_in_threadpool(zabiljezi, "greska", poruka_kljuca, "precac", _kao_tekst(tijelo.get("url")))
                 await asyncio.sleep(0.5)
                 raise HTTPException(status_code=401, detail="Neispravan ključ prečaca.")

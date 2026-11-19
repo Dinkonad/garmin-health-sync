@@ -51,6 +51,7 @@ from webauthn.helpers.structs import (
 from garmin_sync import DB_PATH, init_db, login, sync_activities, sync_day
 from youtube_sync import napravi_router as napravi_youtube_router
 from linkovi_spremi import napravi_router as napravi_linkovi_router
+from galerije import napravi_router as napravi_galerije_router
 from garmin_rute import napravi_zapis, je_ruta_tip, MIN_UDALJENOST_M
 
 BASE_DIR = Path(__file__).resolve().parent
@@ -79,6 +80,8 @@ DOZVOLJENI_ORIGINI = [
     "http://localhost:5176",
     "https://nagyphotos.netlify.app",
 ]
+# adresa(e) klijentske galerije (zasebna stranica), zarezom odvojeno, npr. https://galerija-nagy.netlify.app
+DOZVOLJENI_ORIGINI += [o.strip().rstrip("/") for o in os.getenv("GALERIJA_ORIGINI", "").split(",") if o.strip()]
 app.add_middleware(
     CORSMiddleware,
     allow_origins=DOZVOLJENI_ORIGINI,
@@ -110,6 +113,9 @@ app.include_router(napravi_youtube_router(db_fs, provjeri_admina, CRON_SECRET, p
 
 # Linkovi: spremanje videa s Instagrama/Facebooka/TikToka... jednim dodirom (iOS Prečac) - vidi linkovi_spremi.py
 app.include_router(napravi_linkovi_router(db_fs, provjeri_admina))
+
+# Galerije za klijente (privatni R2 + javni linkovi po tokenu) - vidi galerije.py
+app.include_router(napravi_galerije_router(db_fs, provjeri_admina))
 
 
 def posalji_dan_u_firestore(conn, dan: str):

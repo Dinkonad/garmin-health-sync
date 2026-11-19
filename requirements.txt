@@ -10,3 +10,4 @@ requests==2.34.2
 recurring-ical-events==3.8.2
 cryptography
 Pillow
+boto3
