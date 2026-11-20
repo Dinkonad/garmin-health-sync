@@ -46,7 +46,9 @@ TIP_SADRZAJA = {
     "tif": "image/tiff",
 }
 MAX_ORIGINAL_BAJTOVA = 500 * 1024 * 1024
-MAX_ZIP_BAJTOVA = 10 * 1024 * 1024 * 1024
+# ZIP se slaže na Renderu i šalje u R2, a Render naplaćuje taj odlazni promet (besplatno je samo 5 GB mjesečno).
+# Zato je server ZIP samo za male odabire; veliko preuzimanje radi preglednik (mapa / pojedinačne datoteke / galerija).
+MAX_ZIP_BAJTOVA = 300 * 1024 * 1024
 MALI_ZIP_BAJTOVA = 300 * 1024 * 1024   # do ove veličine ZIP ne čeka iza velikih
 SLIKE_VRIJEME = 6 * 3600          # važenje linka slike (s)
 PREUZIMANJE_VRIJEME = 300         # važenje linka preuzimanja (s)
@@ -722,7 +724,7 @@ def napravi_router(db_fs, provjeri_admina, pohrana_tvornica=napravi_pohranu) -> 
         if not odabrane:
             raise HTTPException(status_code=400, detail="Nema odabranih fotki.")
         if sum(f.get("s", 0) for f in odabrane) > MAX_ZIP_BAJTOVA:
-            raise HTTPException(status_code=413, detail="Odabir je prevelik za jedan ZIP. Odaberi manje fotki.")
+            raise HTTPException(status_code=413, detail="Ovaj odabir je prevelik za ZIP. Odaberi manje fotografija ili preuzmi na računalu (Chrome ili Edge) izravno u mapu.")
         sazetak = hashlib.sha1(f"{m['verzija']}|{','.join(sorted(f['i'] for f in odabrane))}".encode()).hexdigest()
         kljuc = f"z/{gid}/{sazetak}.zip"
         naziv = re.sub(r"[^\w.\- ]", "_", g.get("naziv", "galerija")).strip() or "galerija"

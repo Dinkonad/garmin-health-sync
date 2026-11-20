@@ -17,7 +17,7 @@ jobs:
           # 401 (kriva tajna) je greška; istekla veza je upozorenje. Ni jedno se ne ponavlja.
           for pokusaj in 1 2 3; do
             status=$(curl -s -m 150 -o odgovor.txt -w "%{http_code}" \
-              -X GET "https://garmin-health-sync-xlyl.onrender.com/youtube/osvjezi-cron" \
+              -X GET "${{ vars.BACKEND_URL || 'https://nagy-app.onrender.com' }}/youtube/osvjezi-cron" \
               -H "x-cron-secret: ${{ secrets.CRON_SECRET }}" || echo "000")
             echo "Pokušaj $pokusaj: HTTP $status"
             cat odgovor.txt 2>/dev/null || true

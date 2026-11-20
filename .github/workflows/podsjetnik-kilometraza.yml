@@ -12,5 +12,5 @@ jobs:
     steps:
       - name: Pozovi backend endpoint
         run: |
-          curl -sf -X GET "https://garmin-health-sync-xlyl.onrender.com/push/provjeri-kilometrazu" \
+          curl -sf -X GET "${{ vars.BACKEND_URL || 'https://nagy-app.onrender.com' }}/push/provjeri-kilometrazu" \
             -H "x-cron-secret: ${{ secrets.CRON_SECRET }}"

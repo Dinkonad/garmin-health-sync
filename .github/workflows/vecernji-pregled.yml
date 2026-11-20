@@ -19,5 +19,5 @@ jobs:
       - name: Pozovi backend (šalje se samo kad je >= 20:00 u Zagrebu, jednom dnevno)
         run: |
           curl -sf -m 150 --retry 3 --retry-delay 15 --retry-all-errors \
-            -X GET "https://garmin-health-sync-xlyl.onrender.com/push/vecernji-pregled?cron=1" \
+            -X GET "${{ vars.BACKEND_URL || 'https://nagy-app.onrender.com' }}/push/vecernji-pregled?cron=1" \
             -H "x-cron-secret: ${{ secrets.CRON_SECRET }}"

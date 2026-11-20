@@ -41,7 +41,7 @@ from fastapi.responses import RedirectResponse
 GOOGLE_CLIENT_ID = os.getenv("GOOGLE_CLIENT_ID", "")
 GOOGLE_CLIENT_SECRET = os.getenv("GOOGLE_CLIENT_SECRET", "")
 YOUTUBE_REDIRECT_URI = os.getenv(
-    "YOUTUBE_REDIRECT_URI", "https://garmin-health-sync-xlyl.onrender.com/youtube/callback"
+    "YOUTUBE_REDIRECT_URI", "https://nagy-app.onrender.com/youtube/callback"
 )
 DOZVOLJENI_POVRATNI = [
     o.strip().rstrip("/")
