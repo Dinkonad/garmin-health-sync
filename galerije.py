@@ -47,8 +47,9 @@ TIP_SADRZAJA = {
 }
 MAX_ORIGINAL_BAJTOVA = 500 * 1024 * 1024
 # ZIP se slaže na Renderu i šalje u R2, a Render naplaćuje taj odlazni promet (besplatno je samo 5 GB mjesečno).
-# Zato je server ZIP samo za male odabire; veliko preuzimanje radi preglednik (mapa / pojedinačne datoteke / galerija).
-MAX_ZIP_BAJTOVA = 300 * 1024 * 1024
+# Zato je server ZIP ISKLJUČEN: preglednik sam sprema fotke (mapa / pojedinačne datoteke / galerija mobitela).
+# Uključuje se samo ako se na Renderu izričito postavi ZIP_MAX_MB (npr. 300).
+MAX_ZIP_BAJTOVA = int(os.getenv("ZIP_MAX_MB", "0") or 0) * 1024 * 1024
 MALI_ZIP_BAJTOVA = 300 * 1024 * 1024   # do ove veličine ZIP ne čeka iza velikih
 SLIKE_VRIJEME = 6 * 3600          # važenje linka slike (s)
 PREUZIMANJE_VRIJEME = 300         # važenje linka preuzimanja (s)
@@ -714,6 +715,8 @@ def napravi_router(db_fs, provjeri_admina, pohrana_tvornica=napravi_pohranu) -> 
         gid, g = galerija_po_tokenu(token)
         provjeri_pristup(gid, g, x_pristup)
         provjeri_preuzimanje(g)
+        if MAX_ZIP_BAJTOVA <= 0:
+            raise HTTPException(status_code=410, detail="ZIP preuzimanje je isključeno. Preuzmi fotografije pojedinačno ili u mapu.")
         m = manifest_od(gid)
         zeljeni = tijelo.get("ids")
         if zeljeni is None:
